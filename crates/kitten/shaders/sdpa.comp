@@ -1,0 +1,43 @@
+#version 450
+// flash-style attention, head dim 64: one thread per query row, key/value tiles of 64 in shared memory, online softmax
+layout(local_size_x = 32) in;
+layout(std430, binding = 0) buffer A { float m[]; };
+layout(push_constant) uniform P { uint L, S, H; float scale; uint q_off; int q_sb, q_sh, q_sl, q_se; uint k_off; int k_sb, k_sh, k_sl, k_se; uint v_off; int v_sb, v_sh, v_sl, v_se;
+    uint o_off; uint mk_off; int m_sb, m_sh, m_sl, m_ss; uint mtype; uint nsplit, chunk, tmp_off, pass; } p;
+shared float Ks[32][65]; shared float Vs[32][65];
+void main() {
+    if (p.pass == 1u) { // combine key-split partials: one thread per (bh,row)
+        uint id = gl_WorkGroupID.x * 32u + gl_LocalInvocationID.x; uint bh = gl_WorkGroupID.y; if (id >= p.L) return;
+        uint base = p.tmp_off + (bh * p.L + id) * p.nsplit * 66u; float M = -1e30;
+        for (uint i = 0u; i < p.nsplit; i++) M = max(M, m[base + i * 66u]);
+        float den = 0.0; float o[64]; for (int e = 0; e < 64; e++) o[e] = 0.0;
+        for (uint i = 0u; i < p.nsplit; i++) { uint pb = base + i * 66u; float w = m[pb + 1u] > 0.0 ? exp(m[pb] - M) : 0.0; den += m[pb + 1u] * w; for (int e = 0; e < 64; e++) o[e] += m[pb + 2u + uint(e)] * w; }
+        float inv = den > 0.0 ? 1.0 / den : 0.0; uint ob = p.o_off + (bh * p.L + id) * 64u; for (int e = 0; e < 64; e++) m[ob + uint(e)] = o[e] * inv; return;
+    }
+    uint t = gl_LocalInvocationID.x; uint row = gl_WorkGroupID.x * 32u + t; uint bh = gl_WorkGroupID.y; uint b = bh / p.H, h = bh % p.H;
+    bool ok = row < p.L; uint r = ok ? row : 0u;
+    float q[64], o[64]; int qb = int(p.q_off) + int(b) * p.q_sb + int(h) * p.q_sh + int(r) * p.q_sl;
+    for (int e = 0; e < 64; e++) { q[e] = m[qb + e * p.q_se] * p.scale; o[e] = 0.0; }
+    float mx = -1e30, den = 0.0;
+    int mb = int(p.mk_off) + int(b) * p.m_sb + int(h) * p.m_sh + int(r) * p.m_sl;
+    uint sbeg = gl_WorkGroupID.z * p.chunk, send = min(p.S, sbeg + p.chunk);
+    for (uint s0 = sbeg; s0 < send; s0 += 32u) {
+        uint sj = s0 + t;
+        for (int e = 0; e < 64; e++) {
+            Ks[t][e] = sj < send ? m[int(p.k_off) + int(b) * p.k_sb + int(h) * p.k_sh + int(sj) * p.k_sl + e * p.k_se] : 0.0;
+            Vs[t][e] = sj < send ? m[int(p.v_off) + int(b) * p.v_sb + int(h) * p.v_sh + int(sj) * p.v_sl + e * p.v_se] : 0.0;
+        }
+        barrier();
+        uint n = min(32u, send - s0);
+        for (uint j = 0u; j < n; j++) {
+            float s = 0.0; for (int e = 0; e < 64; e++) s = fma(q[e], Ks[j][e], s);
+            if (p.mtype == 1u) s += m[mb + int(s0 + j) * p.m_ss];
+            else if (p.mtype == 2u && m[mb + int(s0 + j) * p.m_ss] == 0.0) continue;
+            if (s > mx) { float c = exp(mx - s); den *= c; for (int e = 0; e < 64; e++) o[e] *= c; mx = s; }
+            float w = exp(s - mx); den += w; for (int e = 0; e < 64; e++) o[e] = fma(w, Vs[j][e], o[e]);
+        }
+        barrier();
+    }
+    if (ok && p.nsplit > 1u) { uint pb = p.tmp_off + ((bh * p.L + row) * p.nsplit + gl_WorkGroupID.z) * 66u; m[pb] = mx; m[pb + 1u] = den; for (int e = 0; e < 64; e++) m[pb + 2u + uint(e)] = o[e]; return; }
+    if (ok) { uint ob = p.o_off + (bh * p.L + row) * 64u; float inv = den > 0.0 ? 1.0 / den : 0.0; for (int e = 0; e < 64; e++) m[ob + uint(e)] = o[e] * inv; }
+}

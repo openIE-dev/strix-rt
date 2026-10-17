@@ -1,0 +1,75 @@
+#version 450
+// coop-matrix attention, head dim 64 (same push layout as sdpa.comp). Workgroup = 64 query rows, 4 subgroups x 16 rows.
+// Single pass (online softmax) over 64-key tiles; each lane keeps 32 output columns of its row in registers.
+// Shared tiles are uvec4-typed (8 halves) so coopMatLoad issues 16-byte LDS reads.
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) buffer A { float m[]; };
+layout(push_constant) uniform P { uint L, S, H; float scale; uint q_off; int q_sb, q_sh, q_sl, q_se; uint k_off; int k_sb, k_sh, k_sl, k_se; uint v_off; int v_sb, v_sh, v_sl, v_se;
+    uint o_off; uint mk_off; int m_sb, m_sh, m_sl, m_ss; uint mtype; uint nsplit, chunk, tmp_off, pass; } p;
+const uint L4 = 9u;   // row stride in uvec4 (72 halves)
+const uint LS = 17u;  // score row stride in vec4 (68 floats)
+shared uvec4 Qs[64 * L4]; shared uvec4 Ks[64 * L4]; shared uvec4 Vs[64 * L4]; shared uvec4 Ps[64 * L4]; shared vec4 Ss[64 * LS]; shared float Ms[64];  // mask tile when the mask does not vary per query row (m_sl == 0)
+#define CM16A coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA>
+#define CM16B coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>
+#define CMACC coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>
+uint pk(float a, float b) { return packFloat2x16(f16vec2(float16_t(a), float16_t(b))); }
+float sget(uint r, uint c) { return Ss[r * LS + (c >> 2)][c & 3u]; }
+void main() {
+    uint tid = gl_LocalInvocationID.x, sg = gl_SubgroupID, lane = gl_SubgroupInvocationID;
+    uint r0 = gl_WorkGroupID.x * 64u, bh = gl_WorkGroupID.y, b = bh / p.H, h = bh % p.H;
+    int qb = int(p.q_off) + int(b) * p.q_sb + int(h) * p.q_sh, kb = int(p.k_off) + int(b) * p.k_sb + int(h) * p.k_sh, vb = int(p.v_off) + int(b) * p.v_sb + int(h) * p.v_sh;
+    int mb = int(p.mk_off) + int(b) * p.m_sb + int(h) * p.m_sh;
+    // 64 rows x 8 uvec4 = 512 items, 4 per thread
+    for (uint e = tid; e < 512u; e += 128u) { uint r = e >> 3, c8 = (e & 7u) * 8u; uint row = r0 + r; float v[8];
+        for (uint i = 0u; i < 8u; i++) v[i] = row < p.L ? m[qb + int(row) * p.q_sl + int(c8 + i) * p.q_se] * p.scale : 0.0;
+        Qs[r * L4 + (e & 7u)] = uvec4(pk(v[0], v[1]), pk(v[2], v[3]), pk(v[4], v[5]), pk(v[6], v[7])); }
+    uint hr = lane & 15u, half_ = lane >> 4; uint myrow = sg * 16u + hr; uint grow = r0 + myrow;
+    uint rr = min(grow, p.L - 1u); int mrow = mb + int(rr) * p.m_sl;
+    float mx = -1e30, den = 0.0; float acc_o[32]; for (uint i = 0u; i < 32u; i++) acc_o[i] = 0.0;
+    uint j0 = half_ * 32u;
+    for (uint s0 = 0u; s0 < p.S; s0 += 64u) {
+        barrier();
+        for (uint e = tid; e < 512u; e += 128u) { uint r = e >> 3, c8 = (e & 7u) * 8u; uint key = s0 + r; bool ok = key < p.S; float v[8];
+            for (uint i = 0u; i < 8u; i++) v[i] = ok ? m[kb + int(key) * p.k_sl + int(c8 + i) * p.k_se] : 0.0;
+            Ks[r * L4 + (e & 7u)] = uvec4(pk(v[0], v[1]), pk(v[2], v[3]), pk(v[4], v[5]), pk(v[6], v[7]));
+            for (uint i = 0u; i < 8u; i++) v[i] = ok ? m[vb + int(key) * p.v_sl + int(c8 + i) * p.v_se] : 0.0;
+            Vs[r * L4 + (e & 7u)] = uvec4(pk(v[0], v[1]), pk(v[2], v[3]), pk(v[4], v[5]), pk(v[6], v[7])); }
+        if (p.mtype != 0u && p.m_sl == 0 && tid < 64u) { uint key = s0 + tid; Ms[tid] = key < p.S ? m[mb + int(key) * p.m_ss] : 0.0; }
+        barrier();
+        [[unroll]] for (uint n = 0u; n < 4u; n++) {
+            CMACC acc = CMACC(0.0);
+            [[unroll]] for (uint kk = 0u; kk < 4u; kk++) { CM16A a; CM16B bm;
+                coopMatLoad(a, Qs, sg * 16u * L4 + kk * 2u, L4, gl_CooperativeMatrixLayoutRowMajor);
+                coopMatLoad(bm, Ks, n * 16u * L4 + kk * 2u, L4, gl_CooperativeMatrixLayoutColumnMajor);
+                acc = coopMatMulAdd(a, bm, acc); }
+            coopMatStore(acc, Ss, sg * 16u * LS + n * 4u, LS, gl_CooperativeMatrixLayoutRowMajor);
+        }
+        subgroupMemoryBarrierShared(); subgroupBarrier();
+        uint n = min(64u, p.S - s0); float w[32]; float tm = -1e30;
+        for (uint jj = 0u; jj < 32u; jj++) { uint j = j0 + jj; w[jj] = -1e30;
+            if (j < n) { float s = sget(myrow, j);
+                if (p.mtype != 0u) { float mv = p.m_sl == 0 ? Ms[j] : m[mrow + int(s0 + j) * p.m_ss]; if (p.mtype == 1u) s += mv; else if (mv == 0.0) s = -1e30; }
+                w[jj] = s; tm = max(tm, s); } }
+        tm = max(tm, subgroupShuffleXor(tm, 16u));
+        float M = max(mx, tm); float al = exp(mx - M); mx = M; float ps_ = 0.0;
+        for (uint jj = 0u; jj < 32u; jj++) { float e_ = w[jj] > -1e29 ? exp(w[jj] - M) : 0.0; w[jj] = e_; ps_ += e_; }
+        den = den * al + ps_;
+        for (uint q = 0u; q < 4u; q++) Ps[myrow * L4 + half_ * 4u + q] = uvec4(pk(w[q*8u], w[q*8u+1u]), pk(w[q*8u+2u], w[q*8u+3u]), pk(w[q*8u+4u], w[q*8u+5u]), pk(w[q*8u+6u], w[q*8u+7u]));
+        subgroupMemoryBarrierShared(); subgroupBarrier();
+        CMACC o[4]; [[unroll]] for (uint nn = 0u; nn < 4u; nn++) o[nn] = CMACC(0.0);
+        [[unroll]] for (uint kk = 0u; kk < 4u; kk++) { CM16A a; coopMatLoad(a, Ps, sg * 16u * L4 + kk * 2u, L4, gl_CooperativeMatrixLayoutRowMajor);
+            [[unroll]] for (uint nn = 0u; nn < 4u; nn++) { CM16B bm; coopMatLoad(bm, Vs, kk * 16u * L4 + nn * 2u, L4, gl_CooperativeMatrixLayoutRowMajor); o[nn] = coopMatMulAdd(a, bm, o[nn]); } }
+        [[unroll]] for (uint nn = 0u; nn < 4u; nn++) coopMatStore(o[nn], Ss, sg * 16u * LS + nn * 4u, LS, gl_CooperativeMatrixLayoutRowMajor);
+        subgroupMemoryBarrierShared(); subgroupBarrier();
+        for (uint jj = 0u; jj < 32u; jj++) acc_o[jj] = acc_o[jj] * al + sget(myrow, j0 + jj);
+    }
+    float D = den + subgroupShuffleXor(den, 16u); float inv = D > 0.0 ? 1.0 / D : 0.0;
+    if (grow < p.L) { uint ob = p.o_off + (p.chunk == 1u ? ((b * p.L + grow) * p.H + h) : (bh * p.L + grow)) * 64u + j0;
+        for (uint jj = 0u; jj < 32u; jj++) m[ob + jj] = acc_o[jj] * inv; }
+}

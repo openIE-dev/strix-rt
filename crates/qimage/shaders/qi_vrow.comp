@@ -1,0 +1,32 @@
+#version 450
+// Per-row VAE ops, one 256-lane workgroup per row (pixel):
+//  mode 0: Wan RMS_norm over channels: x / max(||x||, 1e-12) * sqrt(C) * G[g_off + c], optional SiLU -> f16 O[r*ldo + c]
+//  mode 1: softmax(x * scale) over C entries -> f16 O[r*ldo + c]  (VAE mid-block attention probabilities)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer O { float16_t o[]; };
+layout(std430, binding = 2) readonly buffer G { float g[]; };
+layout(push_constant) uniform PC { uint mode; uint C; uint ldx; uint ldo; uint g_off; uint silu; float scale; uint pad; } pc;
+shared float red[16];
+float wsum(float v) { v = subgroupAdd(v); if (subgroupElect()) red[gl_SubgroupID] = v; barrier();
+    float s = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) s += red[i]; barrier(); return s; }
+float wmax(float v) { v = subgroupMax(v); if (subgroupElect()) red[gl_SubgroupID] = v; barrier();
+    float s = -3.0e38; for (uint i = 0u; i < gl_NumSubgroups; i++) s = max(s, red[i]); barrier(); return s; }
+void main() {
+    uint r = gl_WorkGroupID.x, l = gl_LocalInvocationID.x; uint xb = r * pc.ldx, ob = r * pc.ldo;
+    if (pc.mode == 0u) {
+        float ss = 0.0; for (uint c = l; c < pc.C; c += 256u) { float v = x[xb + c]; ss += v * v; }
+        float inv = sqrt(float(pc.C)) / max(sqrt(wsum(ss)), 1e-12);
+        for (uint c = l; c < pc.C; c += 256u) { float v = x[xb + c] * inv * g[pc.g_off + c]; if (pc.silu != 0u) v = v / (1.0 + exp(-v)); o[ob + c] = float16_t(v); }
+    } else {
+        float m = -3.0e38; for (uint c = l; c < pc.C; c += 256u) m = max(m, x[xb + c] * pc.scale);
+        m = wmax(m); float s = 0.0;
+        for (uint c = l; c < pc.C; c += 256u) s += exp(x[xb + c] * pc.scale - m);
+        float inv = 1.0 / wsum(s);
+        for (uint c = l; c < pc.C; c += 256u) o[ob + c] = float16_t(exp(x[xb + c] * pc.scale - m) * inv);
+    }
+}

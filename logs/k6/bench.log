@@ -1,0 +1,66 @@
+perf level: high  start 03:13:16
+== te x3
+qwen ids match ref: true (154 tokens)  clip ids match ref: true (26 tokens)
+warm: 504241/943537 pages were resident; MADV_POPULATE_READ ret 0 in 0.255s
+qwen loaded 0.35s, clip 0.11s
+qwen encode (wall, gpu) s [(0.25824713, 0.1818052722687378), (0.222488575, 0.18239403091746142), (0.220266283, 0.18267949329952243)]; clip pooled (cpu) s [0.075472071, 0.074077701, 0.073028461]
+  qwen prompt_embeds           n=89600     cos 0.999928  rel 1.203e-2  max|d| 2.2329
+  clip pooled                  n=768       cos 0.999946  rel 1.039e-2  max|d| 0.0408
+== gen 10 steps
+warm: 6753621/14732665 pages were resident; MADV_POPULATE_READ ret 0 in 6.286s
+loaded in 10.78s (zero copy true, st 10.72s)
+grid T 13 H 40 W 72 -> 9360 video tokens, 88 audio tokens, 25 text tokens
+text embed (cpu) 0.02s
+  x after step 0 (vis)         n=599040    cos 0.999999  rel 1.378e-3  max|d| 0.0156
+  x after step 0 (aud)         n=3520      cos 0.999998  rel 1.933e-3  max|d| 0.0156
+  step 0: t 1000.00 forward 45.62s (gpu 45.40s) step total 45.72s
+  x after step 1 (vis)         n=599040    cos 0.999997  rel 2.598e-3  max|d| 0.0469
+  x after step 1 (aud)         n=3520      cos 0.999995  rel 3.171e-3  max|d| 0.0234
+  step 1: t 977.01 forward 45.50s (gpu 45.43s) step total 45.61s
+  x after step 2 (vis)         n=599040    cos 0.999985  rel 5.528e-3  max|d| 0.1094
+  x after step 2 (aud)         n=3520      cos 0.999990  rel 4.563e-3  max|d| 0.0312
+  step 2: t 949.37 forward 45.51s (gpu 45.43s) step total 45.61s
+  x after step 3 (vis)         n=599040    cos 0.999910  rel 1.343e-2  max|d| 0.2969
+  x after step 3 (aud)         n=3520      cos 0.999980  rel 6.266e-3  max|d| 0.0391
+  step 3: t 915.49 forward 45.54s (gpu 45.46s) step total 45.65s
+  x after step 4 (vis)         n=599040    cos 0.999676  rel 2.546e-2  max|d| 0.5117
+  x after step 4 (aud)         n=3520      cos 0.999956  rel 9.401e-3  max|d| 0.0781
+  step 4: t 873.02 forward 45.47s (gpu 45.39s) step total 45.58s
+  x after step 5 (vis)         n=599040    cos 0.999017  rel 4.435e-2  max|d| 0.7930
+  x after step 5 (aud)         n=3520      cos 0.999906  rel 1.374e-2  max|d| 0.1016
+  step 5: t 818.18 forward 45.45s (gpu 45.36s) step total 45.56s
+  x after step 6 (vis)         n=599040    cos 0.997176  rel 7.522e-2  max|d| 1.2344
+  x after step 6 (aud)         n=3520      cos 0.999792  rel 2.040e-2  max|d| 0.1250
+  step 6: t 744.68 forward 45.53s (gpu 45.45s) step total 45.64s
+  x after step 7 (vis)         n=599040    cos 0.992154  rel 1.255e-1  max|d| 1.8711
+  x after step 7 (aud)         n=3520      cos 0.999549  rel 3.006e-2  max|d| 0.1465
+  step 7: t 641.03 forward 45.45s (gpu 45.37s) step total 45.56s
+  x after step 8 (vis)         n=599040    cos 0.982213  rel 1.893e-1  max|d| 2.8672
+  x after step 8 (aud)         n=3520      cos 0.999037  rel 4.393e-2  max|d| 0.2109
+  step 8: t 483.87 forward 45.44s (gpu 45.36s) step total 45.55s
+  step 9: t 217.39 forward 45.49s (gpu 45.41s) step total 45.52s
+== 10-step PiFlow sampling from the reference noise
+  video latents                n=599040    cos 0.976094  rel 2.196e-1  max|d| 3.6172
+  audio latents                n=3520      cos 0.998809  rel 4.885e-2  max|d| 0.2812
+RESULT dit_wall_s 456.01 gpu_s 454.06 step_median_s 45.61 steps 10 out ~/k6_ref/bench/gen
+== vae 1
+vae loaded 0.74s (0 convs)
+tile x 0..48 done
+tile x 40..72 done
+vae decode 19.57s wall, 17.16s gpu -> 3x49x320x576
+== vae 2
+vae loaded 0.67s (0 convs)
+tile x 0..48 done
+tile x 40..72 done
+vae decode 19.71s wall, 17.27s gpu -> 3x49x320x576
+== vae 3
+vae loaded 0.67s (0 convs)
+tile x 0..48 done
+tile x 40..72 done
+vae decode 19.79s wall, 17.31s gpu -> 3x49x320x576
+== aud x3
+warm: 300112/417764 pages were resident; MADV_POPULATE_READ ret 0 in 0.106s
+audio loaded 0.81s
+audio decode (wall, gpu) s: [(0.480698855, 0.16291297667314913), (0.24720964, 0.16217333133785244), (0.24880614, 0.16313087067444984)] -> mel 176 frames, 90112 samples
+end 03:22:08
+restored: auto

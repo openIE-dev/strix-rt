@@ -1,0 +1,31 @@
+#version 450
+// Qwen3.5/3.8 MTP (NextN) input: c = [rmsnorm(e) * enorm | rmsnorm(h) * hnorm], with e = token embedding and
+// h = the trunk's final normed hidden h_nextn = xw * rsqrt(sq[h_slot]/K + eps) (xw = x * output_norm, unscaled).
+// Also zeroes the norm slots of the MTP aux region (words zero_base + [0,128) and zero_base + [256,512)).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 1024) in;
+layout(std430, binding = 0) readonly buffer E { float e[]; };
+layout(std430, binding = 1) readonly buffer H { float hx[]; };
+layout(std430, binding = 2) writeonly buffer C { float c[]; };
+layout(std430, binding = 3) buffer A { float sq[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint K; uint e_off; uint h_off; uint c_off; uint h_slot; uint en_off; uint hn_off; float eps; uint zero_base; } pc;
+shared float r1[32], r2[32];
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    float hs = inversesqrt(sq[pc.h_slot] / float(pc.K) + pc.eps);
+    float se = 0.0, sh = 0.0;
+    for (uint i = t; i < pc.K; i += 1024u) { float a = e[pc.e_off + i], b = hx[pc.h_off + i] * hs; se += a * a; sh += b * b; }
+    se = subgroupAdd(se); sh = subgroupAdd(sh);
+    if (subgroupElect()) { r1[gl_SubgroupID] = se; r2[gl_SubgroupID] = sh; }
+    barrier();
+    float te = 0.0, th = 0.0; for (uint s = 0u; s < gl_NumSubgroups; s++) { te += r1[s]; th += r2[s]; }
+    float ie = inversesqrt(te / float(pc.K) + pc.eps), ih = inversesqrt(th / float(pc.K) + pc.eps);
+    for (uint i = t; i < pc.K; i += 1024u) {
+        c[pc.c_off + i] = e[pc.e_off + i] * ie * f32w[pc.en_off + i];
+        c[pc.c_off + pc.K + i] = hx[pc.h_off + i] * hs * ih * f32w[pc.hn_off + i];
+    }
+    barrier();
+    if (t < 384u) { uint wd = t < 128u ? t : 128u + t; sq[pc.zero_base + wd] = 0.0; }
+}

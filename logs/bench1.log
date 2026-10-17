@@ -1,0 +1,82 @@
+gguf v3 arch=Some("qwen2") tensors=339 kv=38 align=32 data_off=5954240 types={"F32": 141, "Q4K": 169, "Q6K": 29}
+DeviceInfo {
+    name: "Radeon 8060S Graphics (RADV STRIX_HALO)",
+    driver_name: "radv",
+    driver_info: "Mesa 26.0.8-1ubuntu0.3",
+    api_version: "1.4.335",
+    subgroup_size: 64,
+    min_subgroup: 32,
+    max_subgroup: 64,
+    max_wg_count: [
+        4294967295,
+        65535,
+        65535,
+    ],
+    max_wg_invocations: 1024,
+    max_storage_buffer_range: 4294967295,
+    max_shared_mem: 65536,
+    coop_matrix: [
+        "M16xN16xK16 A=UINT8 B=UINT8 C=UINT32 R=UINT32 scope=SUBGROUP",
+        "M16xN16xK16 A=UINT8 B=UINT8 C=SINT32 R=SINT32 scope=SUBGROUP",
+        "M16xN16xK16 A=UINT8 B=UINT8 C=SINT32 R=SINT32 scope=SUBGROUP",
+        "M16xN16xK16 A=UINT8 B=SINT8 C=UINT32 R=UINT32 scope=SUBGROUP",
+        "M16xN16xK16 A=UINT8 B=SINT8 C=SINT32 R=SINT32 scope=SUBGROUP",
+        "M16xN16xK16 A=UINT8 B=SINT8 C=SINT32 R=SINT32 scope=SUBGROUP",
+        "M16xN16xK16 A=SINT8 B=UINT8 C=UINT32 R=UINT32 scope=SUBGROUP",
+        "M16xN16xK16 A=SINT8 B=UINT8 C=SINT32 R=SINT32 scope=SUBGROUP",
+        "M16xN16xK16 A=SINT8 B=UINT8 C=SINT32 R=SINT32 scope=SUBGROUP",
+        "M16xN16xK16 A=SINT8 B=SINT8 C=UINT32 R=UINT32 scope=SUBGROUP",
+        "M16xN16xK16 A=SINT8 B=SINT8 C=SINT32 R=SINT32 scope=SUBGROUP",
+        "M16xN16xK16 A=SINT8 B=SINT8 C=SINT32 R=SINT32 scope=SUBGROUP",
+        "M16xN16xK16 A=FLOAT16 B=FLOAT16 C=FLOAT16 R=FLOAT16 scope=SUBGROUP",
+        "M16xN16xK16 A=FLOAT16 B=FLOAT16 C=FLOAT32 R=FLOAT32 scope=SUBGROUP",
+    ],
+    heaps: [
+        "heap0: 40.2 GiB flags=",
+        "heap1: 80.3 GiB flags=DEVICE_LOCAL",
+    ],
+    mem_types: [
+        "type0: heap1 DL",
+        "type1: heap1 DL",
+        "type2: heap0 HV|HC",
+        "type3: heap1 DL|HV|HC",
+        "type4: heap1 DL|HV|HC",
+        "type5: heap0 HV|HC|HCached",
+        "type6: heap0 HV|HC|HCached",
+        "type7: heap1 DL",
+        "type8: heap0 HV|HC",
+        "type9: heap1 DL|HV|HC",
+        "type10: heap0 HV|HC|HCached",
+    ],
+    ts_period_ns: 10.019036,
+}
+
+| shape (N x K) | tensor | cfg ls/nr/sg | MiB | copies | us/iter | GB/s | % of 256 | max_abs | max_abs/max|ref| |
+| 18944 x 3584 (ffn_gate/up) | blk.0.ffn_gate.weight | 32/1/32 | 36.4 | 8 | 176.9 | 216.4 | 84.5% | 8.941e-7 | 2.893e-7 |
+| 18944 x 3584 (ffn_gate/up) | blk.0.ffn_gate.weight | 64/1/32 | 36.4 | 8 | 199.3 | 192.1 | 75.0% | 9.537e-7 | 3.086e-7 |
+| 18944 x 3584 (ffn_gate/up) | blk.0.ffn_gate.weight | 64/1/64 | 36.4 | 8 | 199.5 | 191.9 | 75.0% | 9.537e-7 | 3.086e-7 |
+| 18944 x 3584 (ffn_gate/up) | blk.0.ffn_gate.weight | 128/1/64 | 36.4 | 8 | 209.2 | 183.0 | 71.5% | 9.537e-7 | 3.086e-7 |
+| 18944 x 3584 (ffn_gate/up) | blk.0.ffn_gate.weight | 64/2/64 | 36.4 | 8 | 185.2 | 206.7 | 80.8% | 9.537e-7 | 3.086e-7 |
+| 18944 x 3584 (ffn_gate/up) | blk.0.ffn_gate.weight | 64/4/64 | 36.4 | 8 | 186.6 | 205.1 | 80.1% | 9.537e-7 | 3.086e-7 |
+| 18944 x 3584 (ffn_gate/up) | blk.0.ffn_gate.weight | 64/1/auto | 36.4 | 8 | 198.7 | 192.7 | 75.3% | 9.537e-7 | 3.086e-7 |
+| 3584 x 18944 (ffn_down) | blk.3.ffn_down.weight | 32/1/32 | 36.4 | 8 | 191.0 | 200.4 | 78.3% | 1.907e-6 | 1.020e-7 |
+| 3584 x 18944 (ffn_down) | blk.3.ffn_down.weight | 64/1/32 | 36.4 | 8 | 192.1 | 199.3 | 77.9% | 1.907e-6 | 1.020e-7 |
+| 3584 x 18944 (ffn_down) | blk.3.ffn_down.weight | 64/1/64 | 36.4 | 8 | 244.8 | 156.4 | 61.1% | 1.907e-6 | 1.020e-7 |
+| 3584 x 18944 (ffn_down) | blk.3.ffn_down.weight | 128/1/64 | 36.4 | 8 | 289.0 | 132.5 | 51.7% | 1.431e-6 | 7.648e-8 |
+| 3584 x 18944 (ffn_down) | blk.3.ffn_down.weight | 64/2/64 | 36.4 | 8 | 307.5 | 124.5 | 48.6% | 1.907e-6 | 1.020e-7 |
+| 3584 x 18944 (ffn_down) | blk.3.ffn_down.weight | 64/4/64 | 36.4 | 8 | 285.6 | 134.0 | 52.4% | 1.907e-6 | 1.020e-7 |
+| 3584 x 18944 (ffn_down) | blk.3.ffn_down.weight | 64/1/auto | 36.4 | 8 | 246.6 | 155.2 | 60.6% | 1.907e-6 | 1.020e-7 |
+| 3584 x 3584 (attn_q/o) | blk.0.attn_output.weight | 32/1/32 | 6.9 | 32 | 42.9 | 169.1 | 66.1% | 4.172e-7 | 1.735e-7 |
+| 3584 x 3584 (attn_q/o) | blk.0.attn_output.weight | 64/1/32 | 6.9 | 32 | 47.6 | 152.4 | 59.5% | 4.768e-7 | 1.983e-7 |
+| 3584 x 3584 (attn_q/o) | blk.0.attn_output.weight | 64/1/64 | 6.9 | 32 | 55.9 | 129.8 | 50.7% | 4.768e-7 | 1.983e-7 |
+| 3584 x 3584 (attn_q/o) | blk.0.attn_output.weight | 128/1/64 | 6.9 | 32 | 51.5 | 140.8 | 55.0% | 4.768e-7 | 1.983e-7 |
+| 3584 x 3584 (attn_q/o) | blk.0.attn_output.weight | 64/2/64 | 6.9 | 32 | 57.9 | 125.2 | 48.9% | 4.768e-7 | 1.983e-7 |
+| 3584 x 3584 (attn_q/o) | blk.0.attn_output.weight | 64/4/64 | 6.9 | 32 | 51.1 | 142.1 | 55.5% | 4.768e-7 | 1.983e-7 |
+| 3584 x 3584 (attn_q/o) | blk.0.attn_output.weight | 64/1/auto | 6.9 | 32 | 55.6 | 130.5 | 51.0% | 4.768e-7 | 1.983e-7 |
+| 152064 x 3584 (token_embd(lm-head shape)) | token_embd.weight | 32/1/32 | 292.4 | 1 | 1530.3 | 200.7 | 78.4% | 8.345e-7 | 3.459e-7 |
+| 152064 x 3584 (token_embd(lm-head shape)) | token_embd.weight | 64/1/32 | 292.4 | 1 | 1622.4 | 189.3 | 74.0% | 7.153e-7 | 2.965e-7 |
+| 152064 x 3584 (token_embd(lm-head shape)) | token_embd.weight | 64/1/64 | 292.4 | 1 | 1633.4 | 188.1 | 73.5% | 7.153e-7 | 2.965e-7 |
+| 152064 x 3584 (token_embd(lm-head shape)) | token_embd.weight | 128/1/64 | 292.4 | 1 | 1749.4 | 175.6 | 68.6% | 7.153e-7 | 2.965e-7 |
+| 152064 x 3584 (token_embd(lm-head shape)) | token_embd.weight | 64/2/64 | 292.4 | 1 | 1536.7 | 199.9 | 78.1% | 7.153e-7 | 2.965e-7 |
+| 152064 x 3584 (token_embd(lm-head shape)) | token_embd.weight | 64/4/64 | 292.4 | 1 | 1494.1 | 205.6 | 80.3% | 7.153e-7 | 2.965e-7 |
+| 152064 x 3584 (token_embd(lm-head shape)) | token_embd.weight | 64/1/auto | 292.4 | 1 | 1626.2 | 188.9 | 73.8% | 7.153e-7 | 2.965e-7 |

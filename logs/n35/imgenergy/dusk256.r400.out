@@ -1,0 +1,19 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+preprocess img/dusk256.png -> 512x512 (256 tokens) CPU 3.48 ms
+preprocess CPU median 2.12 ms over 400 runs
+encoded 256 tokens x 4096: median 155.7 ms (GPU wall, 400 runs)
+duration 69.500 s, 1391 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package      5343.845      76.89       10.45     4617.536  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores          93.222       1.34        1.39       -3.490  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu       89.726       1.29        1.64      -24.363  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        2.835       0.04        0.04       -0.253  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx              2462.304      35.43       14.81     1432.961  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other        2806.788      40.39       21.58     1307.050  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket           5358.818      77.11       38.03     2715.648  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon        5323.815      76.60       37.71     2703.129  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

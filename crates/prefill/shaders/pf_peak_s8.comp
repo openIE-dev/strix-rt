@@ -1,0 +1,21 @@
+#version 450
+// Peak coop-matrix MMA throughput probe (s8): register-only MMA chain, 8 independent accumulators per wave.
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Y { int y[]; };
+layout(push_constant) uniform PC { uint iters; } pc;
+void main() {
+    coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> a = coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA>(int8_t(gl_LocalInvocationID.x & 3u));
+    coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> b = coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>(int8_t(1));
+    coopmat<int, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> c[8];
+    [[unroll]] for (uint i = 0u; i < 8u; i++) c[i] = coopmat<int, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(int(0));
+    for (uint it = 0u; it < pc.iters; it++) { [[unroll]] for (uint i = 0u; i < 8u; i++) c[i] = coopMatMulAdd(a, b, c[i]); }
+    [[unroll]] for (uint i = 1u; i < 8u; i++) c[0] = c[0] + c[i];
+    coopMatStore(c[0], y, (gl_WorkGroupID.x * 8u + gl_SubgroupID) * 256u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+}

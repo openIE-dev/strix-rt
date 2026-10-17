@@ -1,0 +1,109 @@
+#version 450
+// Packed-LDS int8 GEMM for Q4_K weights (MMQ-style), shared by all MoE prefill paths (grouped) and plain GEMMs.
+//   Y[m, y_col + n] = sum_g [ (d*sc_g)[n] * xs[g,m] * sum_{k in g} q[n,k] * xq[m,k]  -  (dmin*mn_g)[n] * xu[g,m] ]
+// q in 0..15 (Q4_K nibbles, unsigned) is stored as int8 in shared; activations are q8_1-style int8 (pf_q8).
+// One k-step = one 256-weight Q4_K superblock: a single decode + two barriers per 256 k (the f16 pf_gemm needs 4).
+// WG 256 = 8 waves (2 x 4), tile BM = 32*MI tokens x BN = 128 rows; each wave 16*MI x 32.
+// Per 32-k block: 2 int8 MMAs into an int32 tile, then f += float(c) * R * T - Mn * U, where R/Mn are row-broadcast
+// (stride-0 loads from shared) and T/U column-broadcast (stride-0 loads of the transposed scales).
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const uint MI = 1u;
+layout(constant_id = 1) const uint GRP = 1u;
+layout(constant_id = 2) const uint PROBE = 0u;   // profiling: bit0 = no scale epilogue (f += float(c)), bit1 = no MMA
+layout(std430, binding = 0) readonly buffer W4 { uvec4 w4[]; };
+layout(std430, binding = 1) readonly buffer XQ { int8_t xq[]; };
+layout(std430, binding = 2) readonly buffer XS { float xs[]; };
+layout(std430, binding = 3) readonly buffer XU { float xu[]; };
+layout(std430, binding = 4) readonly buffer GT { uint gt[]; };
+layout(std430, binding = 5) buffer Y { float y[]; };
+layout(push_constant) uniform PC { uint M; uint N; uint K; uint w_off; uint ldx; uint ldy; uint y_col; uint flags; uint maxt; uint estride; } pc;
+const uint WR = 2u, WC = 4u, NJ = 2u, BM = WR * 16u * MI, BN = WC * 16u * NJ, LW = 68u;
+shared uint wt[BN * LW];
+shared float rs[8u * BN];
+shared float ms[8u * BN];
+shared float st[8u * 256u];
+uint sbyte(uvec4 h, uint i) { return (h[i >> 2] >> ((i & 3u) * 8u)) & 255u; }
+void main() {
+    const uint id = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint m0, n0, gM, gW;
+    if (GRP != 0u) {
+        const uint slot = id % pc.maxt; if (slot >= gt[0]) return;
+        const uint e = gt[1u + 3u * slot]; m0 = gt[2u + 3u * slot]; gM = gt[3u + 3u * slot]; gW = pc.w_off + e * pc.estride; n0 = (id / pc.maxt) * BN;
+    } else { const uint MT = (pc.M + BM - 1u) / BM; m0 = (id % MT) * BM; n0 = (id / MT) * BN; gM = pc.M; gW = pc.w_off; }
+    if (n0 >= pc.N) return;
+    const uint t = gl_LocalInvocationID.x, sg = gl_SubgroupID, lane = gl_SubgroupInvocationID;
+    const uint wm = (sg / WC) * (16u * MI), wn = (sg % WC) * (16u * NJ);
+    const uint RB = pc.K / 256u * 144u;
+    const uint dn = t >> 1, dh = t & 1u;
+    const bool rowok = n0 + dn < pc.N;
+    const uint rb = gW + (n0 + dn) * RB;
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> f[MI][NJ];
+    [[unroll]] for (uint i = 0u; i < MI; i++) [[unroll]] for (uint j = 0u; j < NJ; j++) f[i][j] = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+    const uint NB = pc.K / 256u;
+    uvec4 hd = uvec4(0u), q[4];
+    if (rowok) { hd = w4[rb >> 4]; [[unroll]] for (uint i = 0u; i < 4u; i++) q[i] = w4[((rb + 16u + 64u * dh) >> 4) + i]; } else { [[unroll]] for (uint i = 0u; i < 4u; i++) q[i] = uvec4(0u); }
+    for (uint kb = 0u; kb < NB; kb++) {
+        barrier();
+        // store: this lane's 4 sub-blocks (4dh .. 4dh+3) as int8 nibbles + their scales
+        [[unroll]] for (uint p = 0u; p < 2u; p++) {
+            const uint sl = 4u * dh + 2u * p;
+            [[unroll]] for (uint k = 0u; k < 8u; k++) {
+                const uint wv = q[2u * p + (k >> 2)][k & 3u];
+                wt[dn * LW + sl * 8u + k] = wv & 0x0F0F0F0Fu;
+                wt[dn * LW + (sl + 1u) * 8u + k] = (wv >> 4) & 0x0F0F0F0Fu;
+            }
+        }
+        const vec2 dm = unpackHalf2x16(hd.x);
+        [[unroll]] for (uint u = 0u; u < 4u; u++) {
+            const uint s = 4u * dh + u; uint sc_, mn_;
+            if (s < 4u) { sc_ = sbyte(hd, 4u + s) & 63u; mn_ = sbyte(hd, 8u + s) & 63u; }
+            else { sc_ = (sbyte(hd, 8u + s) & 0xFu) | ((sbyte(hd, s) >> 6) << 4); mn_ = (sbyte(hd, 8u + s) >> 4) | ((sbyte(hd, 4u + s) >> 6) << 4); }
+            rs[s * BN + dn] = rowok ? dm.x * float(sc_) : 0.0; ms[s * BN + dn] = rowok ? dm.y * float(mn_) : 0.0;
+        }
+        barrier();
+        // prefetch next superblock into registers while the MMAs run
+        if (kb + 1u < NB && rowok) { const uint b = rb + (kb + 1u) * 144u; hd = w4[b >> 4]; [[unroll]] for (uint i = 0u; i < 4u; i++) q[i] = w4[((b + 16u + 64u * dh) >> 4) + i]; }
+        [[unroll]] for (uint j = 0u; j < 8u; j++) {
+            coopmat<int, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> c[MI][NJ];
+            [[unroll]] for (uint i = 0u; i < MI; i++) [[unroll]] for (uint jn = 0u; jn < NJ; jn++) c[i][jn] = coopmat<int, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0);
+            [[unroll]] for (uint kk = 0u; kk < 2u; kk++) {
+                coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> a[MI];
+                coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> b[NJ];
+                [[unroll]] for (uint i = 0u; i < MI; i++) coopMatLoad(a[i], xq, (m0 + wm + 16u * i) * pc.K + kb * 256u + j * 32u + kk * 16u, pc.K, gl_CooperativeMatrixLayoutRowMajor);
+                [[unroll]] for (uint jn = 0u; jn < NJ; jn++) coopMatLoad(b[jn], wt, (wn + 16u * jn) * LW + j * 8u + kk * 4u, LW, gl_CooperativeMatrixLayoutColumnMajor);
+                [[unroll]] for (uint i = 0u; i < MI; i++) [[unroll]] for (uint jn = 0u; jn < NJ; jn++) if ((PROBE & 2u) == 0u) c[i][jn] = coopMatMulAdd(a[i], b[jn], c[i][jn]);
+            }
+            if ((PROBE & 1u) != 0u) { [[unroll]] for (uint i = 0u; i < MI; i++) [[unroll]] for (uint jn = 0u; jn < NJ; jn++) f[i][jn] = f[i][jn] + coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(c[i][jn]); continue; }
+            const uint g = kb * 8u + j;
+            [[unroll]] for (uint i = 0u; i < MI; i++) {
+                coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> tb, ub;
+                coopMatLoad(tb, xs, g * pc.ldx + m0 + wm + 16u * i, 0u, gl_CooperativeMatrixLayoutColumnMajor);
+                coopMatLoad(ub, xu, g * pc.ldx + m0 + wm + 16u * i, 0u, gl_CooperativeMatrixLayoutColumnMajor);
+                [[unroll]] for (uint jn = 0u; jn < NJ; jn++) {
+                    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> rb_, mb;
+                    coopMatLoad(rb_, rs, j * BN + wn + 16u * jn, 0u, gl_CooperativeMatrixLayoutRowMajor);
+                    coopMatLoad(mb, ms, j * BN + wn + 16u * jn, 0u, gl_CooperativeMatrixLayoutRowMajor);
+                    f[i][jn] = f[i][jn] + coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(c[i][jn]) * rb_ * tb - mb * ub;
+                }
+            }
+        }
+    }
+    // epilogue: per wave 16x16 staging in shared, guarded stores
+    const bool acc = (pc.flags & 1u) != 0u;
+    [[unroll]] for (uint i = 0u; i < MI; i++) [[unroll]] for (uint jn = 0u; jn < NJ; jn++) {
+        coopMatStore(f[i][jn], st, sg * 256u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+        subgroupMemoryBarrierShared(); subgroupBarrier();
+        [[unroll]] for (uint r = 0u; r < 8u; r++) {
+            const uint e = r * 32u + lane, rr = e >> 4, cc = e & 15u;
+            const uint m = m0 + wm + 16u * i + rr, n = n0 + wn + 16u * jn + cc;
+            if (m < gM && n < pc.N) { const uint o = m * pc.ldy + pc.y_col + n; y[o] = acc ? y[o] + st[sg * 256u + e] : st[sg * 256u + e]; }
+        }
+        subgroupBarrier();
+    }
+}

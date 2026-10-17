@@ -1,0 +1,25 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// Elementwise over [L][N] (one lane per element). mode 0: A = f16(gelu(H[:, n]) * H[:, N + n]) (GeGLU, H width 2N);
+// 1: A = f16(relu(H + b)); 2: H += b (in place); 3: A = f16(gelu(H + b)); 4: A = f16(H); 5: H = gelu(H + b) in place. gelu = exact erf form.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer H { float hb[]; };
+layout(std430, binding = 1) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 2) readonly buffer F { float f[]; };
+layout(push_constant) uniform PC { uint total; uint N; uint ldh; uint lda; uint b_off; uint mode; } pc;
+float erf_(float x) { float z = abs(x), t = 1.0 / (1.0 + 0.5 * z);   // Numerical Recipes erfc, |err| < 1.2e-7
+    float r = t * exp(-z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277)))))))));
+    return x >= 0.0 ? 1.0 - r : r - 1.0; }
+float gelu(float x) { return 0.5 * x * (1.0 + erf_(x * 0.70710678118654752)); }
+void main() {
+    uint e = gl_GlobalInvocationID.x; if (e >= pc.total) return;
+    uint t = e / pc.N, n = e % pc.N;
+    float b = pc.b_off != 0xffffffffu ? f[pc.b_off + n] : 0.0;
+    if (pc.mode == 0u) a[t * pc.lda + n] = float16_t(gelu(hb[t * pc.ldh + n]) * hb[t * pc.ldh + pc.N + n]);
+    else if (pc.mode == 1u) a[t * pc.lda + n] = float16_t(max(hb[t * pc.ldh + n] + b, 0.0));
+    else if (pc.mode == 2u) hb[t * pc.ldh + n] += b;
+    else if (pc.mode == 3u) a[t * pc.lda + n] = float16_t(gelu(hb[t * pc.ldh + n] + b));
+    else if (pc.mode == 4u) a[t * pc.lda + n] = float16_t(hb[t * pc.ldh + n]);
+    else hb[t * pc.ldh + n] = gelu(hb[t * pc.ldh + n] + b);
+}

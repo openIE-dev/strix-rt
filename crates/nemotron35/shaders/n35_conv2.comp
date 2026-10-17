@@ -1,0 +1,18 @@
+#version 450
+// Mamba-2 causal depthwise conv1d (kernel 4) on the xBC slice of the in_proj output, one token:
+// o[c] = silu(sum_k w[c][k] * win[k] + b[c]), win = (3 cached inputs, current); the cache shifts by one into st2 (verify col1: st stays at the post-col0 state).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer I { float zx[]; };
+layout(std430, binding = 1) buffer S { float st[]; };
+layout(std430, binding = 2) writeonly buffer O { float o[]; };
+layout(std430, binding = 3) readonly buffer F { float f[]; };
+layout(std430, binding = 4) writeonly buffer S2 { float st2[]; };
+layout(push_constant) uniform PC { uint ch; uint in_off; uint st_off; uint w_off; uint b_off; } pc;
+void main() {
+    uint c = gl_GlobalInvocationID.x; if (c >= pc.ch) return;
+    uint sb = pc.st_off + c * 3u, wb = pc.w_off + c * 4u;
+    float s0 = st[sb], s1 = st[sb + 1u], s2 = st[sb + 2u], xv = zx[pc.in_off + c];
+    float a = f[wb] * s0; a += f[wb + 1u] * s1; a += f[wb + 2u] * s2; a += f[wb + 3u] * xv; a += f[pc.b_off + c];
+    st2[sb] = s1; st2[sb + 1u] = s2; st2[sb + 2u] = xv;
+    o[c] = a / (1.0 + exp(-a));
+}

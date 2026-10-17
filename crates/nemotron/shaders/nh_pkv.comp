@@ -1,0 +1,14 @@
+#version 450
+// Batched K/V store: token t's K and V rows of Y [M][ldy] go to the f16 caches at position pos0 + t.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Q { float yv[]; };
+layout(std430, binding = 1) writeonly buffer KC { float16_t kc[]; };
+layout(std430, binding = 2) writeonly buffer VC { float16_t vc[]; };
+layout(push_constant) uniform PC { uint n; uint k_off; uint v_off; uint cache_off; uint pos0; uint ldy; } pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x, t = gl_WorkGroupID.y; if (i >= pc.n) return;
+    uint o = pc.cache_off + (pc.pos0 + t) * pc.n + i;
+    kc[o] = float16_t(yv[t * pc.ldy + pc.k_off + i]); vc[o] = float16_t(yv[t * pc.ldy + pc.v_off + i]);
+}

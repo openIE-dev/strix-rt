@@ -1,0 +1,33 @@
+#version 450
+// gpt-oss router (one workgroup): logits = W x + b (F32 [n_exp][K]), top-k (descending, lowest index on ties),
+// weights = softmax over the k selected logits. ids -> au[440+j], weights -> f[448+j].
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer F { float f32w[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) buffer AU { uint au[]; };
+layout(std430, binding = 2) buffer AF { float af[]; };
+layout(push_constant) uniform PC { uint w_off; uint b_off; uint K; uint n_exp; uint top_k; } pc;
+shared float lg[64];
+void main() {
+    uint xo = gl_WorkGroupID.y * pc.K, ab = 16u * gl_WorkGroupID.y;
+    uint L = gl_SubgroupInvocationID, wv = gl_SubgroupID, nw = gl_NumSubgroups;
+    for (uint e = wv; e < pc.n_exp; e += nw) {
+        float s = 0.0;
+        for (uint i = L; i < pc.K; i += gl_SubgroupSize) s += f32w[pc.w_off + e * pc.K + i] * x[xo + i];
+        s = subgroupAdd(s);
+        if (subgroupElect()) lg[e] = s + f32w[pc.b_off + e];
+    }
+    barrier();
+    if (gl_LocalInvocationID.x == 0u) {
+        uint ids[8]; float v[8];
+        for (uint j = 0u; j < pc.top_k; j++) {
+            float bv = -3.4e38; uint bi = 0u;
+            for (uint e = 0u; e < pc.n_exp; e++) { bool used = false; for (uint q = 0u; q < j; q++) used = used || ids[q] == e; if (!used && lg[e] > bv) { bv = lg[e]; bi = e; } }
+            ids[j] = bi; v[j] = bv;
+        }
+        float sum = 0.0; for (uint j = 0u; j < pc.top_k; j++) { v[j] = exp(v[j] - v[0]); sum += v[j]; }
+        for (uint j = 0u; j < pc.top_k; j++) { au[440u + ab + j] = ids[j]; af[448u + ab + j] = v[j] / sum; }
+    }
+}

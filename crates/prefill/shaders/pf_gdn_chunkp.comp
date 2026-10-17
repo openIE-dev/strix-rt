@@ -1,0 +1,43 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+// Pre-pass for pf_gdn_chunk: one workgroup per (chunk, head) computes the state-independent chunk terms
+// lg (in-chunk cumulative log decay), beta, A[t][u] = beta_t (k_t.k_u) e^(lg_t-lg_u) (u<t), P[t][u] = (q_t.k_u) e^(lg_t-lg_u) (u<=t)
+// into X[(h * nch + c) * (2C + 2C^2)] = [lg C][beta C][A C*C][P C*C].
+layout(local_size_x = 64) in;
+layout(constant_id = 1) const uint C = 16u;
+layout(std430, binding = 0) readonly buffer CV { float cv[]; };
+layout(std430, binding = 1) readonly buffer PR { float pr[]; };
+layout(std430, binding = 2) writeonly buffer X { float x[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint nk; uint nv; uint s_off4; uint a_off; uint b_off; uint dt_off; uint A_off; uint ldp; uint ldc; uint M; } pc;
+shared vec4 ks[C][32]; shared vec4 qs[C][32]; shared float lg[C]; shared float bet[C];
+void main() {
+    uint nch = (pc.M + C - 1u) / C, c = gl_WorkGroupID.x / pc.nv, h = gl_WorkGroupID.x % pc.nv, lid = gl_LocalInvocationID.x, kh = h % pc.nk;
+    uint t0 = c * C, n = min(C, pc.M - t0), xb = (h * nch + c) * (2u * C + 2u * C * C);
+    for (uint e2 = lid; e2 < n * 64u; e2 += 64u) {
+        uint tt = e2 >> 6u, e = e2 & 63u, cb = (t0 + tt) * pc.ldc;
+        if (e < 32u) { uint b = cb + kh * 128u + 4u * e; qs[tt][e] = vec4(cv[b], cv[b + 1u], cv[b + 2u], cv[b + 3u]); }
+        else { uint b = cb + pc.nk * 128u + kh * 128u + 4u * (e - 32u); ks[tt][e - 32u] = vec4(cv[b], cv[b + 1u], cv[b + 2u], cv[b + 3u]); }
+    }
+    if (lid < n) {
+        uint pb = (t0 + lid) * pc.ldp;
+        float al = pr[pb + pc.a_off + h] + f32w[pc.dt_off + h];
+        float sp = al > 20.0 ? al : log(1.0 + exp(al));
+        lg[lid] = sp * f32w[pc.A_off + h];
+        bet[lid] = 1.0 / (1.0 + exp(-pr[pb + pc.b_off + h]));
+    }
+    barrier();
+    if (lid == 0u) { float a = 0.0; for (uint tt = 0u; tt < n; tt++) { a += lg[tt]; lg[tt] = a; } }
+    barrier();
+    if (lid < n) { x[xb + lid] = lg[lid]; x[xb + C + lid] = bet[lid]; }
+    for (uint e = lid; e < n * n; e += 64u) {
+        uint t = e / n, u = e % n;
+        if (u <= t) {
+            vec4 dk = vec4(0.0), dq = vec4(0.0);
+            [[unroll]] for (uint j = 0u; j < 32u; j++) { vec4 kv = ks[u][j]; dk += ks[t][j] * kv; dq += qs[t][j] * kv; }
+            float g = exp(lg[t] - lg[u]);
+            x[xb + 2u * C + t * C + u] = u < t ? bet[t] * (dk.x + dk.y + dk.z + dk.w) * g : 0.0;
+            x[xb + 2u * C + C * C + t * C + u] = (dq.x + dq.y + dq.z + dq.w) * g;
+        }
+    }
+}

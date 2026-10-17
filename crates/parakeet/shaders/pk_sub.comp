@@ -1,0 +1,32 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// FastConformer dw-striding subsampling pieces. Activations are channel-last [t][f][c] (C = 256), only valid frames are
+// computed (zero padding outside, identical to HF's per-stage time masking for batch 1).
+//  mode 0: conv1 3x3 s2 p1 (1 -> C) + bias + ReLU: in = mel [Tin][Fin] (f32) -> Out f32 [t][f][c]
+//  mode 1: depthwise 3x3 s2 p1 + bias: in f32 [Tin][Fin][C] -> A f16 [(t*Fout+f)*C + c] (A operand of pointwise GEMM)
+//  mode 2: Out[i] = relu(Out[i] + b[c])  (pointwise bias + ReLU, in place)
+//  mode 3: A[t*C*Fout + c*Fout + f] = f16(relu(In[(t*Fout+f)*C + c] + b[c]))  (final ReLU + flatten to c*F + f)
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer I { float inp[]; };
+layout(std430, binding = 1) buffer O { float outp[]; };
+layout(std430, binding = 2) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 3) readonly buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint mode; uint Tin; uint Fin; uint Tout; uint Fout; uint w_off; uint b_off; } pc;
+const uint C = 256u;
+void main() {
+    uint i = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 256u + gl_LocalInvocationID.x;
+    if (i >= pc.Tout * pc.Fout * C) return;
+    uint c = i % C, tf = i / C, f = tf % pc.Fout, t = tf / pc.Fout;
+    if (pc.mode >= 2u) {
+        if (pc.mode == 2u) { outp[i] = max(outp[i] + pr[pc.b_off + c], 0.0); }
+        else a[t * C * pc.Fout + c * pc.Fout + f] = float16_t(max(inp[i] + pr[pc.b_off + c], 0.0));
+        return;
+    }
+    float s = pr[pc.b_off + c];
+    for (uint kt = 0u; kt < 3u; kt++) { int ti = int(2u * t + kt) - 1; if (ti < 0 || ti >= int(pc.Tin)) continue;
+        for (uint kf = 0u; kf < 3u; kf++) { int fi = int(2u * f + kf) - 1; if (fi < 0 || fi >= int(pc.Fin)) continue;
+            float w = pr[pc.w_off + c * 9u + kt * 3u + kf];
+            s += w * (pc.mode == 0u ? inp[uint(ti) * pc.Fin + uint(fi)] : inp[(uint(ti) * pc.Fin + uint(fi)) * C + c]); } }
+    if (pc.mode == 0u) outp[i] = max(s, 0.0); else a[i] = float16_t(s);
+}

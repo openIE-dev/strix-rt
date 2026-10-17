@@ -1,0 +1,38 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+// LFM2 batched rope: per (token t, head) workgroup of 64: per-head RMSNorm (q_norm/k_norm), NeoX RoPE at pos0+t,
+// q rotated in place, k/v written to the f16 cache (decode layout cache_off + pos*n_kv*64 + kh*64).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Q { float qkv[]; };
+layout(std430, binding = 1) buffer KC { float16_t kc[]; };
+layout(std430, binding = 2) buffer VC { float16_t vc[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; float theta; uint qn; uint kn; float eps; uint pos0; uint ldp; uint M; } pc;
+shared float red[4]; shared float xs[64];
+void main() {
+    uint nh = pc.n_head + pc.n_kv, g = gl_WorkGroupID.x, t = g / nh, h = g - t * nh, i = gl_LocalInvocationID.x, pos = pc.pos0 + t;
+    bool isq = h < pc.n_head; uint kh = h - pc.n_head;
+    uint rb = t * pc.ldp, o = rb + (isq ? h * 64u : pc.n_head * 64u + kh * 64u);
+    float v = qkv[o + i];
+    float ss = subgroupAdd(v * v);
+    if (subgroupElect()) red[gl_SubgroupID] = ss;
+    barrier();
+    float tot = 0.0; for (uint s = 0u; s < gl_NumSubgroups; s++) tot += red[s];
+    xs[i] = v * inversesqrt(tot / 64.0 + pc.eps) * f32w[(isq ? pc.qn : pc.kn) + i];
+    barrier();
+    uint j = i & 31u;
+    float a = float(pos) * pow(pc.theta, -float(2u * j) / 64.0);
+    float c = cos(a), s = sin(a);
+    float r = i < 32u ? xs[i] * c - xs[i + 32u] * s : xs[i - 32u] * s + xs[i] * c;
+    if (isq) { qkv[o + i] = r; }
+    else {
+        uint co = pc.cache_off + pos * pc.n_kv * 64u + kh * 64u;
+        kc[co + i] = float16_t(r);
+        vc[co + i] = float16_t(qkv[rb + pc.n_head * 64u + pc.n_kv * 64u + kh * 64u + i]);
+    }
+}

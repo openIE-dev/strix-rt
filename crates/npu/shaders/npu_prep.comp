@@ -1,0 +1,37 @@
+#version 450
+// NPU half of a split linear fed by an already-rotated f32 activation (e.g. crates/prefill's Bonsai xr/xf, [rows][K]):
+// one workgroup per token row r < M: per-token amax -> int8 A in the wa_dc tiled layout [M/m][K/k][m][k] + scale sx[r].
+// Rows r >= n_rows are written as zeros (the NPU always computes the full M of its build).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer A { uint a[]; };
+layout(std430, binding = 2) writeonly buffer S { float sx[]; };
+layout(push_constant) uniform P { uint K; uint m; uint k; uint n_rows; uint ldx; uint x0; uint kv; } p;  // K-chunk: columns [x0, x0+kv) of x, zero beyond kv
+shared float red[64];
+float q(float v, float inv) { float t = v * inv; return clamp(sign(t) * floor(abs(t) + 0.5), -127.0, 127.0); }
+void main() {
+  uint r = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x;
+  bool live = r < p.n_rows;
+  float mx = 0.0;
+  if (live) for (uint i = tid; i < p.kv; i += 256u) mx = max(mx, abs(x[r * p.ldx + p.x0 + i]));
+  mx = subgroupMax(mx);
+  if (gl_SubgroupInvocationID == 0u) red[gl_SubgroupID] = mx;
+  barrier();
+  if (tid == 0u) { float m2 = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) m2 = max(m2, red[i]); red[63] = m2; }
+  barrier();
+  float amax = red[63];
+  float sc = amax > 0.0 ? amax / 127.0 : 1.0;
+  if (tid == 0u) sx[r] = live ? sc : 0.0;
+  float inv = 1.0 / sc;
+  uint mb = r / p.m, ii = r % p.m;
+  for (uint i4 = tid; i4 < p.K / 4u; i4 += 256u) {
+    uint kx = i4 * 4u, kb = kx / p.k, j = kx % p.k;
+    uint o = ((mb * (p.K / p.k) + kb) * p.m + ii) * p.k + j;
+    uint v = 0u;
+    if (live && kx < p.kv) { uint b = r * p.ldx + p.x0 + kx;
+      int q0 = int(q(x[b], inv)), q1 = int(q(x[b + 1u], inv)), q2 = int(q(x[b + 2u], inv)), q3 = int(q(x[b + 3u], inv));
+      v = uint(q0 & 255) | (uint(q1 & 255) << 8) | (uint(q2 & 255) << 16) | (uint(q3 & 255) << 24); }
+    a[o / 4u] = v;
+  }
+}

@@ -1,0 +1,17 @@
+#version 450
+// NPU half of a split linear: Y[r][c] = float(C[r][c]) * sx[r] * sw[c] for c < Nn, written into the shared
+// [M][ldy] output (cols 0..Nn). C is the NPU int32 output read straight from its dma-buf.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer C { ivec4 c[]; };
+layout(std430, binding = 1) readonly buffer SX { float sx[]; };
+layout(std430, binding = 2) readonly buffer SW { vec4 sw[]; };
+layout(std430, binding = 3) buffer Y { vec4 y[]; };
+layout(push_constant) uniform P { uint N4; uint total4; uint ldy4; uint ycol4; uint acc; } p;
+void main() {
+  uint i = gl_GlobalInvocationID.x + gl_NumWorkGroups.x * 256u * gl_WorkGroupID.y;
+  if (i >= p.total4) return;
+  uint r = i / p.N4, c4 = i % p.N4;
+  uint o = r * p.ldy4 + p.ycol4 + c4;
+  vec4 v = vec4(c[i]) * sx[r] * sw[c4];
+  y[o] = p.acc != 0u ? y[o] + v : v;
+}

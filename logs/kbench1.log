@@ -1,0 +1,12 @@
+loaded: 3 arenas [1995, 2029, 142] MiB, f32 333312 floats, 197 quant tensors on GPU
+load 0.63s, gemv ls=64 sg=32
+| tensor | type | N x K | ls/sg | us/call | GB/s | % of 256 | max_abs | max_abs/max|ref| |
+| attn_q.weight | Q4K | 3584 x 3584 | 64/32 | 80.2 | 90.4 | 35.3% | 1.79e-6 | 5.45e-7 |
+| attn_output.weight | Q4K | 3584 x 3584 | 64/32 | 80.7 | 89.9 | 35.1% | 5.96e-7 | 3.82e-7 |
+| attn_k.weight | Q4K | 512 x 3584 | 64/32 | 14.9 | 70.6 | 27.6% | 1.07e-6 | 3.70e-7 |
+| attn_v.weight | Q6K | 512 x 3584 | 64/32 | 8.4 | 180.6 | 70.5% | 1.19e-7 | 1.35e-7 |
+| ffn_gate.weight | Q4K | 18944 x 3584 | 64/32 | 591.9 | 64.7 | 25.3% | 8.49e-7 | 3.34e-7 |
+| ffn_gate.weight+up (swiglu) | Q4K | 18944 x 3584 | 64/32 | 559.8 | 136.6 | 53.4% | 9.54e-7 | 4.72e-7 |
+| ffn_down.weight | Q4K | 3584 x 18944 | 64/32 | 200.7 | 190.7 | 74.5% | 1.91e-6 | 1.05e-6 |
+| ffn_down.weight | Q6K | 3584 x 18944 | 64/32 | 251.5 | 221.8 | 86.6% | 2.38e-7 | 1.12e-7 |
+| output.weight | Q6K | 152064 x 3584 | 64/32 | 3099.3 | 144.4 | 56.4% | 3.58e-7 | 1.63e-7 |

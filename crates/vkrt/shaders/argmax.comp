@@ -1,0 +1,27 @@
+#version 450
+// Partial argmax per workgroup, merged with one 64-bit atomicMax per workgroup into aux (key = orderable(val)<<32 | ~idx).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_atomic_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer L { float logits[]; };
+layout(std430, binding = 1) buffer A64 { uint64_t a64[]; };
+#ifndef AUX_KEY64
+#define AUX_KEY64 32u
+#endif
+layout(push_constant) uniform PC { uint N; } pc;
+shared float sv[8]; shared uint si[8];
+void main() {
+    uint t = gl_LocalInvocationID.x, stride = gl_NumWorkGroups.x * 256u;
+    float bv = -3.4e38; uint bi = 0xFFFFFFFFu;
+    for (uint i = gl_WorkGroupID.x * 256u + t; i < pc.N; i += stride) { float v = logits[i]; if (v > bv) { bv = v; bi = i; } }
+    float m = subgroupMax(bv); uint mi = subgroupMin(bv == m ? bi : 0xFFFFFFFFu);
+    if (gl_SubgroupInvocationID == 0u) { sv[gl_SubgroupID] = m; si[gl_SubgroupID] = mi; }
+    barrier();
+    if (t == 0u) {
+        float v = sv[0]; uint idx = si[0];
+        for (uint s = 1u; s < gl_NumSubgroups; s++) if (sv[s] > v || (sv[s] == v && si[s] < idx)) { v = sv[s]; idx = si[s]; }
+        uint b = floatBitsToUint(v); uint ord = (b & 0x80000000u) != 0u ? ~b : (b | 0x80000000u);
+        atomicMax(a64[AUX_KEY64], (uint64_t(ord) << 32) | uint64_t(~idx));
+    }
+}

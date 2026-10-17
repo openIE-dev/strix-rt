@@ -1,0 +1,13 @@
+#version 450
+// Per-32-item sums of x for the Q4_K pair GEMV (removes the redundant per-row sum(x) dot4s): xs[it] = sum_k dot(x4[it*8+k], 1), k ascending.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer X { vec4 x[]; };
+layout(std430, binding = 1) buffer XS { float xs[]; };
+layout(push_constant) uniform PC { uint K; uint x_off4; } pc;
+void main() {
+    uint it = gl_GlobalInvocationID.x;
+    if (it >= pc.K / 32u) return;
+    float s = 0.0, h0 = 0.0, h1 = 0.0;
+    for (uint k = 0u; k < 8u; k++) { float d = dot(x[pc.x_off4 + it * 8u + k], vec4(1.0)); s += d; if (k < 4u) h0 += d; else h1 += d; }
+    xs[it] = s; xs[8192u + 2u * it] = h0; xs[8192u + 2u * it + 1u] = h1;   // halves: Q6_K per-16 sums
+}

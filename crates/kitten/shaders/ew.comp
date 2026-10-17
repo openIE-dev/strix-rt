@@ -1,0 +1,48 @@
+#version 450
+// generic strided elementwise: dst[strided] = f(a[strided], b[strided]) over up to 6 dims (zero strides broadcast)
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer A { float m[]; };
+layout(push_constant) uniform P { uint n, nd, op; float p0, p1; uint d_off, a_off, b_off; uint sh[6]; int ds[6]; int as_[6]; int bs[6]; } p;
+float erf_(float x) { float s = sign(x); x = abs(x); float t = 1.0 / (1.0 + 0.3275911 * x);
+    float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-x * x); return s * y; }
+void main() {
+    uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u;
+    if (i >= p.n) return;
+    int di = int(p.d_off), ai = int(p.a_off), bi = int(p.b_off); uint r = i;
+    for (int d = int(p.nd) - 1; d >= 0; d--) { uint c = r % p.sh[d]; r /= p.sh[d]; di += int(c) * p.ds[d]; ai += int(c) * p.as_[d]; bi += int(c) * p.bs[d]; }
+    float a = p.op == 29u ? 0.0 : m[ai]; float b = (p.op >= 1u && p.op <= 10u) ? m[bi] : 0.0; float y;
+    switch (p.op) {
+        case 0u: y = a; break;
+        case 1u: y = a + p.p0 * b; break;
+        case 2u: y = a - p.p0 * b; break;
+        case 3u: y = b - p.p0 * a; break;
+        case 4u: y = a * b; break;
+        case 5u: y = a / b; break;
+        case 6u: y = floor(a / b); break;
+        case 7u: y = a >= b ? 1.0 : 0.0; break;
+        case 8u: y = a > b ? 1.0 : 0.0; break;
+        case 9u: y = a == b ? 1.0 : 0.0; break;
+        case 10u: y = b != 0.0 ? p.p0 : a; break;
+        case 11u: y = p.p0 == 2.0 ? a * a : pow(a, p.p0); break;
+        case 12u: y = min(max(a, p.p0), p.p1); break;
+        case 13u: y = abs(a); break;
+        case 14u: y = exp(a); break;
+        case 15u: y = sin(a); break;
+        case 16u: y = cos(a); break;
+        case 17u: y = tanh(clamp(a, -15.0, 15.0)); break;
+        case 18u: y = a / (1.0 + exp(-a)); break;
+        case 19u: { float sp = a > 20.0 ? a : log(1.0 + exp(a)); y = a * tanh(sp); break; }
+        case 20u: y = 0.5 * a * (1.0 + erf_(a * 0.70710678118654752)); break;
+        case 21u: y = 0.5 * a * (1.0 + tanh(0.7978845608 * (a + 0.044715 * a * a * a))); break;
+        case 22u: y = a > 0.0 ? a : a * p.p0; break;
+        case 23u: y = a > 0.0 ? a : p.p0 * (exp(a) - 1.0); break;
+        case 24u: y = a - floor(a / p.p0) * p.p0; break;
+        case 25u: y = a == 0.0 ? 1.0 : 0.0; break;
+        case 26u: y = a != 0.0 ? 1.0 : 0.0; break;
+        case 27u: y = trunc(a); break;
+        case 28u: y = p.p0 * a; break;
+        case 29u: y = p.p0; break;
+        default: y = 0.0;
+    }
+    m[di] = y;
+}

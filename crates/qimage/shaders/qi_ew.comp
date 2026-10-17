@@ -1,0 +1,27 @@
+#version 450
+// Elementwise over n = rows * D (i -> t = i / D, c = i % D):
+//  0: X[t*D+c] += g * Y[t*ldy+ycol+c], g = tanh(M[g_off+c]) or 1 if g_off == ~0     (gated residual)
+//  1: A[t*lda+c] = f16(Y[t*ldy+ycol+c])                                             (f32 -> f16 operand)
+//  2: A[t*lda+c] = f16(silu(Y[t*ldy+c]) * Y[t*ldy+D+c])                             (SwiGLU, gate | up halves)
+//  3: A[t*lda+c] = f16(gelu_tanh(Y[t*ldy+c]))
+//  4: A[t*lda+c] = f16(silu(Y[t*ldy+c]))
+//  5: X[t*D+c] = Y[t*ldy+ycol+c]
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Y { float y[]; };
+layout(std430, binding = 2) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 3) readonly buffer M { float md[]; };
+layout(push_constant) uniform PC { uint mode; uint n; uint D; uint ldy; uint ycol; uint lda; uint g_off; uint pad; } pc;
+void main() {
+    uint i = gl_WorkGroupID.x * 256u + gl_LocalInvocationID.x;
+    if (i >= pc.n) return;
+    uint t = i / pc.D, c = i - t * pc.D, yi = t * pc.ldy + pc.ycol + c;
+    if (pc.mode == 0u) { float g = pc.g_off == 0xffffffffu ? 1.0 : tanh(md[pc.g_off + c]); x[t * pc.D + c] += g * y[yi]; }
+    else if (pc.mode == 1u) a[t * pc.lda + c] = float16_t(y[yi]);
+    else if (pc.mode == 2u) { float g = y[t * pc.ldy + c], u = y[t * pc.ldy + pc.D + c]; a[t * pc.lda + c] = float16_t(g / (1.0 + exp(-g)) * u); }
+    else if (pc.mode == 3u) { float v = y[yi]; a[t * pc.lda + c] = float16_t(0.5 * v * (1.0 + tanh(0.7978845608028654 * (v + 0.044715 * v * v * v)))); }
+    else if (pc.mode == 4u) { float v = y[yi]; a[t * pc.lda + c] = float16_t(v / (1.0 + exp(-v))); }
+    else x[t * pc.D + c] = y[yi];
+}

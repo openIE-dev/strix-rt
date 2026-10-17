@@ -1,0 +1,21 @@
+[waited 0s for GPU lock; start 05:57:30]
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+weights: copied in 1.136s, 4 arenas/imports (6851 MiB), 498 quant tensors, 2645504 f32 floats
+hadamard: 401 rotated weights, inverse embed true, sign widths [5120, 6144, 17408], gdn perm (128, 16, 3)
+prefill 2048: best 4488.0 ms (all [4487]) -> pp2048 456.33 tok/s
+duration 5.865 s, 4632 samples (790 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package       700.826     119.50       18.80      590.575  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores          24.588       4.19        2.60        9.362  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu       23.590       4.02        2.13       11.070  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        4.089       0.70        0.79       -0.517  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx               234.561      40.00        0.05      234.274  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00       -0.010  gpu_metrics average_ipu_power [power-integrated]
+soc_other         325.373      55.48       14.25      241.817  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket            583.524      99.50       16.43      487.150  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon         580.560      98.99       16.08      486.238  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]
+[end 05:57:38; exit 0; ran under GPU lock]

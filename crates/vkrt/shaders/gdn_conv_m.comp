@@ -1,0 +1,43 @@
+#version 450
+// Multi-column gdn_conv for the speculative verify pass (m <= 4 tokens, same math per column as gdn_conv.comp).
+// Conv state is kept in registers across columns; the state after column j (j < m-1) goes to snapshot buffer j.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer IN { float mix[]; };
+layout(std430, binding = 1) buffer ST { float st[]; };
+layout(std430, binding = 2) writeonly buffer OUT { float o[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(std430, binding = 4) writeonly buffer C0 { float c0[]; };
+layout(std430, binding = 5) writeonly buffer C1 { float c1[]; };
+layout(std430, binding = 6) writeonly buffer C2 { float c2[]; };
+layout(push_constant) uniform PC { uint nk; uint st_off; uint w_off; uint ks; float eps; uint in_off; uint out_off; uint m; uint in_cs; uint out_cs; } pc;
+shared float red[4][4];
+void main() {
+    uint h = gl_WorkGroupID.x, i = gl_LocalInvocationID.x, c = h * 128u + i;
+    uint so = pc.st_off + c * (pc.ks - 1u), wo = pc.w_off + c * pc.ks;
+    float s[3]; [[unroll]] for (uint k = 0u; k < 3u; k++) s[k] = k + 1u < pc.ks ? st[so + k] : 0.0;
+    float v[4];
+    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < pc.m) {
+        float xc = mix[pc.in_off + j * pc.in_cs + c];
+        float acc = f32w[wo + pc.ks - 1u] * xc;
+        for (uint k = 0u; k + 1u < pc.ks; k++) acc += f32w[wo + k] * s[k];
+        for (uint k = 0u; k + 2u < pc.ks; k++) s[k] = s[k + 1u];
+        s[pc.ks - 2u] = xc;
+        if (j + 1u < pc.m) for (uint k = 0u; k + 1u < pc.ks; k++) { if (j == 0u) c0[so + k] = s[k]; else if (j == 1u) c1[so + k] = s[k]; else c2[so + k] = s[k]; }
+        v[j] = acc / (1.0 + exp(-acc));
+        if (h < 2u * pc.nk) { float ss = subgroupAdd(v[j] * v[j]); if (subgroupElect()) red[j][gl_SubgroupID] = ss; }
+    }
+    for (uint k = 0u; k + 1u < pc.ks; k++) st[so + k] = s[k];
+    barrier();
+    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < pc.m) {
+        float x = v[j];
+        if (h < 2u * pc.nk) {
+            float tot = 0.0; for (uint q = 0u; q < gl_NumSubgroups; q++) tot += red[j][q];
+            x *= inversesqrt(tot + pc.eps);
+            if (h < pc.nk) x *= inversesqrt(128.0);
+        }
+        o[pc.out_off + j * pc.out_cs + c] = x;
+    }
+}

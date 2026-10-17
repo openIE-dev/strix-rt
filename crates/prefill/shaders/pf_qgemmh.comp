@@ -1,0 +1,139 @@
+#version 450
+// pf_qgemmh: shared packed-LDS expert/plain GEMM with f16 activations (keeps the f16 quality bar).
+// Weights are staged in LDS as int8 codes (Q4_K nibbles 0..15, Q8_0 int8, Q5_0 int5-16) plus f32 per-32-block
+// scale R (d*sc / d) and offset Mn (dmin*mn / 0). Each wave unpacks its B fragments to f16 in registers
+// (b = f16(float(q) * R - Mn), R/Mn stride-0 broadcast loads) right before the f16 MMA. Not bitwise equal to pf_gemm
+// (~5e-4 rel, same size as pf_gemm's own error vs exact), so callers gate defaults on teacher-forced agreement.
+// Tile: WG 256 = 8 waves (WR=2 x WC=4); BM = 32*MI tokens (the qgemm_rows() contract), BN = 64*NJ weight rows.
+// k-step = 32*KD weights (KD = 8 -> 256 = one Q4_K superblock; Q8_0/Q5_0 may use KD 2/4 so K % 256 != 0 shapes do
+// not end in a mostly-masked 256-step). LPR = 256/BN lanes decode one row, SPL = KD/LPR sub-blocks each.
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const uint MI = 1u;
+layout(constant_id = 1) const uint GRP = 1u;
+layout(constant_id = 2) const uint PROBE = 0u;   // profiling: bit1 = no MMA; bit2 = per-element fma dequant; bit3 = precise mul,sub
+layout(constant_id = 3) const uint TY = 0u;      // pf_deq codes: 0 Q4_K (KD must be 8, K % 256), 3 Q8_0, 15 Q5_0 (K % 32)
+layout(constant_id = 4) const uint NJ = 2u;      // 16-col B fragments per wave: BN = 64*NJ (1 -> 64 rows, 2 -> 128)
+layout(constant_id = 5) const uint KD = 8u;      // 32-weight sub-blocks per k-step (2, 4, 8)
+// WR: wave rows. 2 = 2 x 4 waves (each B fragment unpacked by 2 waves); 1 = 1 x 8 waves, every B fragment unpacked once
+// (MI doubled by the host to keep BM), more A fragments per wave.
+layout(constant_id = 6) const uint WR = 2u;
+layout(constant_id = 7) const uint PERS = 0u;   // persistent: workgroups loop over the (slot, n-tile) pairs of the grouped tile table
+layout(std430, binding = 0) readonly buffer W4 { uvec4 w4[]; };
+layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
+layout(std430, binding = 1) readonly buffer A { uvec4 a4[]; };
+layout(std430, binding = 4) readonly buffer GT { uint gt[]; };
+layout(std430, binding = 5) buffer Y { float y[]; };
+layout(push_constant) uniform PC { uint M; uint N; uint K; uint w_off; uint lda; uint ldy; uint y_col; uint flags; uint maxt; uint estride; } pc;
+const uint WC = 8u / WR, BM = WR * 16u * MI, BN = WC * 16u * NJ, LW = KD * 8u + 4u, LPR = 256u / BN, SPL = KD / LPR, KSTEP = KD * 32u;
+shared uint wt[BN * LW];
+shared float rs[KD * BN];
+shared float ms[KD * BN];
+shared float st[8u * 256u];
+uint sbyte(uvec4 h, uint i) { return (h[i >> 2] >> ((i & 3u) * 8u)) & 255u; }
+void tile(const uint id, const uint slot_in) {
+    uint m0, n0, gM, gW;
+    if (GRP != 0u) {
+        const uint slot = PERS != 0u ? slot_in : id % pc.maxt; if (slot >= gt[0]) return;
+        const uint e = gt[1u + 3u * slot]; m0 = gt[2u + 3u * slot]; gM = gt[3u + 3u * slot]; gW = pc.w_off + e * pc.estride; n0 = (PERS != 0u ? id : id / pc.maxt) * BN;
+    } else { const uint MT = (pc.M + BM - 1u) / BM; m0 = (id % MT) * BM; n0 = (id / MT) * BN; gM = pc.M; gW = pc.w_off; }
+    if (n0 >= pc.N) return;
+    const uint t = gl_LocalInvocationID.x, sg = gl_SubgroupID, lane = gl_SubgroupInvocationID;
+    const uint wm = (sg / WC) * (16u * MI), wn = (sg % WC) * (16u * NJ);
+    const uint G = pc.K / 32u, RB = TY == 0u ? pc.K / 256u * 144u : G * (TY == 3u ? 34u : 22u);
+    const uint dn = t / LPR, dh = t % LPR;
+    const bool rowok = n0 + dn < pc.N;
+    const uint rb = gW + (n0 + dn) * RB;
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> f[MI][NJ];
+    [[unroll]] for (uint i = 0u; i < MI; i++) [[unroll]] for (uint j = 0u; j < NJ; j++) f[i][j] = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+    const uint NB = (pc.K + KSTEP - 1u) / KSTEP;
+    uvec4 hd = uvec4(0u), q[SPL]; uint qw[8u * SPL]; float sd[SPL];
+    // Q4_K: lane covers sub-blocks SPL*dh .. +SPL of the superblock = qs bytes 16*SPL*dh .. +16*SPL (SPL/2 32-byte nibble groups)
+    #define FETCH(KB) { \
+        if (TY == 0u) { if (rowok) { const uint b = rb + (KB) * 144u; hd = w4[b >> 4]; [[unroll]] for (uint i = 0u; i < SPL; i++) q[i] = w4[((b + 16u + 16u * SPL * dh) >> 4) + i]; } \
+            else { hd = uvec4(0u); [[unroll]] for (uint i = 0u; i < SPL; i++) q[i] = uvec4(0u); } } \
+        else { [[unroll]] for (uint u = 0u; u < SPL; u++) { const uint g = (KB) * KD + SPL * dh + u; sd[u] = 0.0; [[unroll]] for (uint k = 0u; k < 8u; k++) qw[8u * u + k] = 0u; \
+            if (rowok && g < G) { \
+                if (TY == 3u) { const uint h = (rb + g * 34u) >> 1; sd[u] = unpackHalf2x16(uint(w16[h])).x; \
+                    [[unroll]] for (uint k = 0u; k < 8u; k++) qw[8u * u + k] = uint(w16[h + 1u + 2u * k]) | (uint(w16[h + 2u + 2u * k]) << 16); } \
+                else { const uint h = (rb + g * 22u) >> 1; sd[u] = unpackHalf2x16(uint(w16[h])).x; const uint qh = uint(w16[h + 1u]) | (uint(w16[h + 2u]) << 16); \
+                    [[unroll]] for (uint k = 0u; k < 4u; k++) { const uint qs = uint(w16[h + 3u + 2u * k]) | (uint(w16[h + 4u + 2u * k]) << 16); \
+                        const uvec4 b4 = uvec4(qs, qs >> 8, qs >> 16, qs >> 24) & 255u, jj = uvec4(0u, 1u, 2u, 3u) + 4u * k; \
+                        const uvec4 lo = (((b4 & 0xFu) | (((uvec4(qh) >> jj) & 1u) << 4)) + 240u) & 255u; \
+                        const uvec4 hi = (((b4 >> 4) | (((uvec4(qh) >> (jj + 16u)) & 1u) << 4)) + 240u) & 255u; \
+                        qw[8u * u + k] = lo.x | (lo.y << 8) | (lo.z << 16) | (lo.w << 24); qw[8u * u + 4u + k] = hi.x | (hi.y << 8) | (hi.z << 16) | (hi.w << 24); } } } } } }
+    FETCH(0u)
+    const uint lda8 = pc.lda / 8u;
+    for (uint kb = 0u; kb < NB; kb++) {
+        barrier();
+        if (TY == 0u) {
+            [[unroll]] for (uint p = 0u; p < SPL / 2u; p++) {
+                const uint sl = SPL * dh + 2u * p;
+                [[unroll]] for (uint k = 0u; k < 8u; k++) {
+                    const uint wv = q[2u * p + (k >> 2)][k & 3u];
+                    wt[dn * LW + sl * 8u + k] = wv & 0x0F0F0F0Fu;
+                    wt[dn * LW + (sl + 1u) * 8u + k] = (wv >> 4) & 0x0F0F0F0Fu;
+                }
+            }
+            const vec2 dm = unpackHalf2x16(hd.x);
+            [[unroll]] for (uint u = 0u; u < SPL; u++) {
+                const uint s = SPL * dh + u; uint sc_, mn_;
+                if (s < 4u) { sc_ = sbyte(hd, 4u + s) & 63u; mn_ = sbyte(hd, 8u + s) & 63u; }
+                else { sc_ = (sbyte(hd, 8u + s) & 0xFu) | ((sbyte(hd, s) >> 6) << 4); mn_ = (sbyte(hd, 8u + s) >> 4) | ((sbyte(hd, 4u + s) >> 6) << 4); }
+                rs[s * BN + dn] = rowok ? dm.x * float(sc_) : 0.0; ms[s * BN + dn] = rowok ? dm.y * float(mn_) : 0.0;
+            }
+        } else {
+            [[unroll]] for (uint u = 0u; u < SPL; u++) { const uint s = SPL * dh + u;
+                [[unroll]] for (uint k = 0u; k < 8u; k++) wt[dn * LW + s * 8u + k] = qw[8u * u + k];
+                rs[s * BN + dn] = sd[u]; }
+        }
+        barrier();
+        if (kb + 1u < NB) FETCH(kb + 1u)
+        [[unroll]] for (uint j = 0u; j < KD; j++) {
+            if (kb * KD + j >= G) break;
+            coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> rb_[NJ], mb[NJ];
+            [[unroll]] for (uint jn = 0u; jn < NJ; jn++) { coopMatLoad(rb_[jn], rs, j * BN + wn + 16u * jn, 0u, gl_CooperativeMatrixLayoutRowMajor);
+                if (TY == 0u) coopMatLoad(mb[jn], ms, j * BN + wn + 16u * jn, 0u, gl_CooperativeMatrixLayoutRowMajor); }
+            [[unroll]] for (uint kk = 0u; kk < 2u; kk++) {
+                coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> a[MI];
+                coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> b[NJ];
+                [[unroll]] for (uint i = 0u; i < MI; i++) coopMatLoad(a[i], a4, (m0 + wm + 16u * i) * lda8 + ((kb * KSTEP + j * 32u + kk * 16u) >> 3u), lda8, gl_CooperativeMatrixLayoutRowMajor);
+                [[unroll]] for (uint jn = 0u; jn < NJ; jn++) { coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> b8;
+                    coopMatLoad(b8, wt, (wn + 16u * jn) * LW + j * 8u + kk * 4u, LW, gl_CooperativeMatrixLayoutColumnMajor);
+                    if ((PROBE & 12u) == 0u) { if (TY == 0u) b[jn] = coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>(coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>(b8) * rb_[jn] - mb[jn]); else b[jn] = coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>(coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>(b8) * rb_[jn]); }
+                    else { coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> bf = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>(b8);
+                        if ((PROBE & 4u) != 0u) { for (int e = 0; e < bf.length(); e++) bf[e] = fma(bf[e], rb_[jn][e], -mb[jn][e]); }
+                        else { for (int e = 0; e < bf.length(); e++) { precise float pm = bf[e] * rb_[jn][e]; precise float ps = pm - mb[jn][e]; bf[e] = ps; } }
+                        b[jn] = coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>(bf); } }
+                if ((PROBE & 2u) == 0u) { [[unroll]] for (uint i = 0u; i < MI; i++) [[unroll]] for (uint jn = 0u; jn < NJ; jn++) f[i][jn] = coopMatMulAdd(a[i], b[jn], f[i][jn]); }
+            }
+        }
+    }
+    // epilogue: per wave 16x16 staging in shared, guarded stores
+    const bool acc = (pc.flags & 1u) != 0u;
+    [[unroll]] for (uint i = 0u; i < MI; i++) [[unroll]] for (uint jn = 0u; jn < NJ; jn++) {
+        coopMatStore(f[i][jn], st, sg * 256u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+        subgroupMemoryBarrierShared(); subgroupBarrier();
+        [[unroll]] for (uint r = 0u; r < 8u; r++) {
+            const uint e = r * 32u + lane, rr = e >> 4, cc = e & 15u;
+            const uint m = m0 + wm + 16u * i + rr, n = n0 + wn + 16u * jn + cc;
+            if (m < gM && n < pc.N) { const uint o = m * pc.ldy + pc.y_col + n; y[o] = acc ? y[o] + st[sg * 256u + e] : st[sg * 256u + e]; }
+        }
+        subgroupBarrier();
+    }
+}
+void main() {
+    const uint id = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (PERS != 0u && GRP != 0u) {
+        const uint T = gt[0], NT = (pc.N + BN - 1u) / BN, total = T * NT, nwg = gl_NumWorkGroups.x * gl_NumWorkGroups.y;
+        for (uint p = id; p < total; p += nwg) { tile(p / T, p % T); barrier(); }
+    } else tile(id, 0u);
+}

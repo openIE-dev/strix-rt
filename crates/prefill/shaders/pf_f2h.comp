@@ -1,0 +1,14 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// f32 [M][K] (dense) -> f16 A[t * lda + i]: rotated Bonsai activations for the f16 coop-matrix GEMM (PF_TF16).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer A { float16_t a[]; };
+layout(push_constant) uniform PC { uint K; uint lda; uint M; } pc;
+void main() {
+    uint idx = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 256u + gl_LocalInvocationID.x;
+    if (idx >= pc.K * pc.M) return;
+    uint t = idx / pc.K, i = idx - t * pc.K;
+    a[t * pc.lda + i] = float16_t(x[idx]);
+}

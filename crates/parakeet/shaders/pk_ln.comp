@@ -1,0 +1,27 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+// LayerNorm over D (<= 4096) per row t (one workgroup per row). mode 0: f16 A[t*lda + i]; mode 1: in place into X (f32).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 2) readonly buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint D; uint lda; uint g_off; uint b_off; uint mode; float eps; } pc;
+shared float red[16];
+float wsum(float v) {
+    v = subgroupAdd(v); if (subgroupElect()) red[gl_SubgroupID] = v; barrier();
+    float s = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) s += red[i]; barrier(); return s;
+}
+void main() {
+    uint t = gl_WorkGroupID.x, i0 = gl_LocalInvocationID.x, xb = t * pc.D;
+    float v[16]; float s = 0.0;
+    for (uint c = 0u; c < 16u; c++) { uint i = i0 + c * 256u; v[c] = i < pc.D ? x[xb + i] : 0.0; s += v[c]; }
+    float mean = wsum(s) / float(pc.D);
+    float q = 0.0; for (uint c = 0u; c < 16u; c++) { uint i = i0 + c * 256u; if (i < pc.D) { float d = v[c] - mean; q += d * d; } }
+    float rs = inversesqrt(wsum(q) / float(pc.D) + pc.eps);
+    for (uint c = 0u; c < 16u; c++) { uint i = i0 + c * 256u; if (i >= pc.D) break;
+        float o = (v[c] - mean) * rs * pr[pc.g_off + i] + pr[pc.b_off + i];
+        if (pc.mode == 0u) a[t * pc.lda + i] = float16_t(o); else x[xb + i] = o; }
+}

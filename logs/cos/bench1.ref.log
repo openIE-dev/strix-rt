@@ -1,0 +1,37 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+~/cosmos_ref/.venv/lib/python3.14/site-packages/diffusers/utils/deprecation_utils.py:23: FutureWarning: `torch_dtype` is deprecated and will be removed in version 1.0.0. Please use `dtype` instead.
+  deprecate("torch_dtype", "1.0.0", _TORCH_DTYPE_DEPRECATION_MESSAGE)
+The config attributes {'vision_encoder': ['transformers', 'Qwen3VLVisionModel']} were passed to Cosmos3OmniPipeline, but are not expected and will be ignored. Please verify your model_index.json configuration file.
+Keyword arguments {'vision_encoder': ['transformers', 'Qwen3VLVisionModel']} are not expected by Cosmos3OmniPipeline and will be ignored.
+Loading pipeline components...:   0%|          | 0/5 [00:00<?, ?it/s]Loading pipeline components...:  20%|██        | 1/5 [00:00<00:00,  7.23it/s]The config attributes {'clip_output': False} were passed to AutoencoderKLWan, but are not expected and will be ignored. Please verify your config.json configuration file.
+The config attributes {'dtype': 'bfloat16', 'freeze_und': False, 'initializer_range': 0.02, 'joint_attn_implementation': 'two_way', 'max_action_dim': 64, 'max_position_embeddings': 262144, 'model_type': 'qwen3_vl_text', 'position_embedding_type': 'unified_3d_mrope', 'qk_norm': False, 'qk_norm_for_diffusion': True, 'temporal_compression_factor_sound': 1, 'use_cache': True, 'use_moe': True, 'video_temporal_causal': False} were passed to Cosmos3OmniTransformer, but are not expected and will be ignored. Please verify your config.json configuration file.
+
+Loading checkpoint shards:   0%|          | 0/7 [00:00<?, ?it/s][ALoading checkpoint shards: 100%|██████████| 7/7 [00:00<00:00, 209.55it/s]
+Loading pipeline components...:  80%|████████  | 4/5 [00:00<00:00, 18.33it/s]~/venvs/ml/lib/python3.14/site-packages/torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+Loading pipeline components...: 100%|██████████| 5/5 [00:00<00:00,  7.16it/s]
+MIOpen(HIP): Warning [ParseAndLoadDb] File is unreadable: "~/venvs/ml/lib/python3.14/site-packages/_rocm_sdk_libraries_gfx1151/share/miopen/db/gfx1151_20.HIP.fdb.txt"
+~/cosmos_ref/.venv/lib/python3.14/site-packages/diffusers/models/autoencoders/autoencoder_kl_wan.py:424: UserWarning: Mem Efficient attention on Current AMD GPU is still experimental. Enable it with TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1. (Triggered internally at /__w/TheRock/TheRock/external-builds/pytorch/pytorch/aten/src/ATen/native/transformers/hip/sdp_utils.cpp:383.)
+  x = F.scaled_dot_product_attention(q, k, v)
+  0%|          | 0/8 [00:00<?, ?it/s]~/cosmos_ref/.venv/lib/python3.14/site-packages/diffusers/models/attention_dispatch.py:3759: UserWarning: Flash Efficient attention on Current AMD GPU is still experimental. Enable it with TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1. (Triggered internally at /__w/TheRock/TheRock/external-builds/pytorch/pytorch/aten/src/ATen/native/transformers/hip/sdp_utils.cpp:323.)
+  out = torch.nn.functional.scaled_dot_product_attention(
+ 12%|█▎        | 1/8 [00:01<00:08,  1.21s/it] 25%|██▌       | 2/8 [00:02<00:06,  1.15s/it] 38%|███▊      | 3/8 [00:03<00:05,  1.16s/it] 50%|█████     | 4/8 [00:04<00:04,  1.14s/it] 62%|██████▎   | 5/8 [00:05<00:03,  1.13s/it] 75%|███████▌  | 6/8 [00:06<00:02,  1.12s/it] 88%|████████▊ | 7/8 [00:07<00:01,  1.12s/it]100%|██████████| 8/8 [00:09<00:00,  1.12s/it]100%|██████████| 8/8 [00:09<00:00,  1.13s/it]
+PHASE denoise 1792091486.662 1792091496.314
+There are modules in AutoencoderKLWan that should be kept in float32: []. Casting directly with `to()` can lead to inconsistent results; set `torch_dtype` in `from_pretrained()` instead to keep these modules in float32.
+PHASE vae 1792091496.696 1792091505.011
+denoise 9.6514892578125 vae 8.315514326095581 vae_dev cpu (1, 3, 9, 256, 256)
+duration 30.250 s, 606 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package      2182.275      72.14       10.17     1874.625  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores        1170.905      38.71        0.39     1159.095  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu     1130.272      37.36        2.46     1055.853  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone       62.689       2.07        0.03       61.726  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx               280.499       9.27       14.29     -151.808  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.003       0.00        0.00        0.003  gpu_metrics average_ipu_power [power-integrated]
+soc_other         733.356      24.24       23.73       15.641  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket           2144.130      70.88       40.48      919.689  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon        2132.855      70.51       40.21      916.437  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

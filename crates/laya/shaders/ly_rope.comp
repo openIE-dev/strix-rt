@@ -1,0 +1,15 @@
+#version 450
+// In-place NeoX RoPE on the q and k thirds of QKV [L][3D] (head dim 64), positions = row index. One lane per (row, head, pair).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Q { float qkv[]; };
+layout(push_constant) uniform PC { uint L; uint D; uint nh; float theta; } pc;
+void main() {
+    uint e = gl_GlobalInvocationID.x; if (e >= pc.L * pc.nh * 32u) return;
+    uint p = e & 31u, h = (e >> 5) % pc.nh, t = (e >> 5) / pc.nh;
+    float ang = float(t) * (1.0 / pow(pc.theta, float(2u * p) / 64.0)); float c = cos(ang), s = sin(ang);
+    for (uint part = 0u; part < 2u; part++) {
+        uint b = t * 3u * pc.D + part * pc.D + h * 64u + p;
+        float x0 = qkv[b], x1 = qkv[b + 32u];
+        qkv[b] = x0 * c - x1 * s; qkv[b + 32u] = x1 * c + x0 * s;
+    }
+}

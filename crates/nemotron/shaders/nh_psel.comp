@@ -1,0 +1,46 @@
+#version 450
+// Batched MoE router + selection (one workgroup per token): logits = Wg (f32) . a[t] (normed f16 row), p = sigmoid,
+// top-k of p + bias; weights = p / max(sum, 2^-14) (if norm) * scale. r[t*tk + j] = expert, r[M*tk + t*tk + j] = weight bits.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const uint TB = 1u;   // tokens per workgroup: each expert weight row is read once for TB tokens (same per-token summation order)
+const uint KM = 12288u / TB;
+layout(std430, binding = 0) readonly buffer F { float f[]; };
+layout(std430, binding = 1) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 2) writeonly buffer R { uint r[]; };
+layout(push_constant) uniform PC { uint w_off; uint b_off; uint k; uint n_exp; uint top_k; uint norm; float scale; uint lda; uint m; } pc;
+shared float pr[TB][256];
+shared float xs[TB * KM];
+void main() {
+    uint t0 = gl_WorkGroupID.x * TB, l = gl_LocalInvocationID.x, sg = gl_SubgroupID, ns = gl_NumSubgroups, ln = gl_SubgroupInvocationID, sz = gl_SubgroupSize;
+    for (uint b = 0u; b < TB; b++) { const uint tt = min(t0 + b, pc.m - 1u); for (uint i = l; i < pc.k; i += 256u) xs[b * KM + i] = float(a[tt * pc.lda + i]); }
+    barrier();
+    for (uint e = sg; e < pc.n_exp; e += ns) {
+        float s[TB]; uint wb = pc.w_off + e * pc.k;
+        for (uint b = 0u; b < TB; b++) s[b] = 0.0;
+        for (uint i = ln; i < pc.k; i += sz) { const float w = f[wb + i]; for (uint b = 0u; b < TB; b++) s[b] += w * xs[b * KM + i]; }
+        for (uint b = 0u; b < TB; b++) { const float v = subgroupAdd(s[b]); if (subgroupElect()) pr[b][e] = 1.0 / (1.0 + exp(-v)); }
+    }
+    barrier();
+    // top-k on subgroup 0 (as gemma4 g4_router): lane L holds experts L + 32 i (n_exp <= 128, wave32 pipeline);
+    // k rounds of subgroupMax over p + bias, lowest index on ties; weights from unbiased p.
+    if (sg < TB && t0 + sg < pc.m) {
+        const uint t = t0 + sg;
+        float sv[4]; bool used[4];
+        for (uint i = 0u; i < 4u; i++) { uint e = ln + 32u * i; sv[i] = e < pc.n_exp ? pr[sg][e] + f[pc.b_off + e] : -3.4e38; used[i] = e >= pc.n_exp; }
+        uint ids[8]; float ws[8]; float sum = 0.0;
+        for (uint j = 0u; j < pc.top_k; j++) {
+            float bv = -3.4e38; uint bi = 0xFFFFFFFFu;
+            for (uint i = 0u; i < 4u; i++) if (!used[i] && (sv[i] > bv || bi == 0xFFFFFFFFu)) { bv = sv[i]; bi = ln + 32u * i; }
+            float mx = subgroupMax(bi == 0xFFFFFFFFu ? -3.4e38 : bv);
+            uint win = subgroupMin((bi != 0xFFFFFFFFu && bv == mx) ? bi : 0xFFFFFFFFu);
+            if (win % 32u == ln) used[win / 32u] = true;
+            ids[j] = win; ws[j] = pr[sg][win]; sum += pr[sg][win];
+        }
+        sum = max(sum, 6.103515625e-5);
+        if (ln == 0u) for (uint j = 0u; j < pc.top_k; j++) { float w = pc.norm != 0u ? ws[j] / sum : ws[j]; r[t * pc.top_k + j] = ids[j]; r[pc.m * pc.top_k + t * pc.top_k + j] = floatBitsToUint(w * pc.scale); }
+    }
+}

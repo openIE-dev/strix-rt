@@ -1,0 +1,26 @@
+#version 450
+// Gemma 4 MoE grouping (one workgroup, n_exp <= 128): expert of (token t, slot j) = ru[440 + 16t + j] (g4_router slots).
+// Writes g = [src token (nk) | inverse pos (nk)] with rows grouped by expert, and the prefill grouped-GEMM tile table
+// gt = [count, (e, r0, r1)...] with BM-row tiles (same format as prefill/pf_moesort).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer R { uint ru[]; };
+layout(std430, binding = 1) buffer G { uint g[]; };
+layout(std430, binding = 2) buffer T { uint gt[]; };
+layout(push_constant) uniform PC { uint n; uint tk; uint n_exp; uint bm; } pc;
+shared uint cnt[128]; shared uint st[128]; shared uint fill[128];
+void main() {
+    uint t = gl_LocalInvocationID.x, nk = pc.n * pc.tk;
+    if (t < 128u) cnt[t] = 0u;
+    barrier();
+    for (uint q = t; q < nk; q += 256u) atomicAdd(cnt[ru[440u + 16u * (q / pc.tk) + q % pc.tk]], 1u);
+    barrier();
+    if (t == 0u) { uint a = 0u; for (uint e = 0u; e < pc.n_exp; e++) { st[e] = a; fill[e] = a; a += cnt[e]; } }
+    barrier();
+    for (uint q = t; q < nk; q += 256u) { uint j = atomicAdd(fill[ru[440u + 16u * (q / pc.tk) + q % pc.tk]], 1u); g[j] = q / pc.tk; g[nk + q] = j; }
+    if (t == 0u) {
+        uint n = 0u;
+        for (uint e = 0u; e < pc.n_exp; e++) for (uint m = 0u; m < cnt[e]; m += pc.bm) {
+            gt[1u + 3u * n] = e; gt[2u + 3u * n] = st[e] + m; gt[3u + 3u * n] = st[e] + min(m + pc.bm, cnt[e]); n++; }
+        gt[0] = n;
+    }
+}

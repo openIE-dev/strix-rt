@@ -1,0 +1,61 @@
+#version 450
+// Multi-column Gated DeltaNet step for the speculative verify pass: m <= 4 consecutive tokens in one dispatch.
+// Same math as gdn_step.comp per column; each state row is read once, updated m times in registers, the state after
+// column j (j < m-1) is written to snapshot buffer j (rollback), the final state back to S. Replaces m step dispatches,
+// m-1 barriers and m-1 full-state snapshot copies. Column j inputs at cv_off4 + j*cv_cs4, pr offsets + j*pr_cs; output y_off + j*y_cs.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 512) in;
+layout(std430, binding = 0) readonly buffer CV { vec4 cv4[]; };
+layout(std430, binding = 0) readonly buffer CVF { float cvf[]; };
+layout(std430, binding = 1) readonly buffer PR { float pr[]; };
+layout(std430, binding = 2) buffer S { vec4 s4[]; };
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(std430, binding = 5) writeonly buffer S0 { vec4 n0[]; };
+layout(std430, binding = 6) writeonly buffer S1 { vec4 n1[]; };
+layout(std430, binding = 7) writeonly buffer S2 { vec4 n2[]; };
+layout(push_constant) uniform PC { uint nk; uint nv; uint s_off4; uint z_off; uint a_off; uint b_off; uint dt_off; uint A_off; uint nw_off; float eps; uint cv_off4; uint y_off;
+    uint m; uint cv_cs4; uint pr_cs; uint y_cs; } pc;
+shared float os[4][128];
+shared float red[4][16];
+void main() {
+    uint h = gl_WorkGroupID.x, lane = gl_SubgroupInvocationID, sgid = gl_SubgroupID, nsg = gl_NumSubgroups;
+    uint kh = h % pc.nk, m = pc.m;
+    vec4 q[4], k[4]; float decay[4], beta[4]; uint vb[4];
+    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < m) {
+        uint co = pc.cv_off4 + j * pc.cv_cs4, po = j * pc.pr_cs;
+        q[j] = cv4[co + kh * 32u + lane]; k[j] = cv4[co + pc.nk * 32u + kh * 32u + lane];
+        float al = pr[pc.a_off + po + h] + f32w[pc.dt_off + h];
+        float sp = al > 20.0 ? al : log(1.0 + exp(al));
+        decay[j] = exp(sp * f32w[pc.A_off + h]);
+        beta[j] = 1.0 / (1.0 + exp(-pr[pc.b_off + po + h]));
+        vb[j] = co * 4u + 2u * pc.nk * 128u + h * 128u;
+    }
+    for (uint i = sgid; i < 128u; i += nsg) {
+        uint si = pc.s_off4 + (h * 128u + i) * 32u + lane;
+        vec4 s = s4[si];
+        [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < m) {
+            s *= decay[j];
+            float sk = subgroupAdd(dot(s, k[j]));
+            float d = (cvf[vb[j] + i] - sk) * beta[j];
+            s += d * k[j];
+            if (j + 1u < m) { if (j == 0u) n0[si] = s; else if (j == 1u) n1[si] = s; else n2[si] = s; }
+            float oi = subgroupAdd(dot(s, q[j]));
+            if (subgroupElect()) os[j][i] = oi;
+        }
+        s4[si] = s;
+    }
+    barrier();
+    uint t = gl_LocalInvocationID.x, j = t >> 7, tt = t & 127u;
+    float v = j < m ? os[j][tt] : 0.0;
+    float ss = subgroupAdd(v * v);
+    if (subgroupElect()) red[j][(t & 127u) / gl_SubgroupSize] = ss;
+    barrier();
+    if (j < m) {
+        float tot = 0.0; for (uint s2 = 0u; s2 < 128u / gl_SubgroupSize; s2++) tot += red[j][s2];
+        float z = pr[pc.z_off + j * pc.pr_cs + h * 128u + tt];
+        y[pc.y_off + j * pc.y_cs + h * 128u + tt] = v * inversesqrt(tot / 128.0 + pc.eps) * f32w[pc.nw_off + tt] * (z / (1.0 + exp(-z)));
+    }
+}

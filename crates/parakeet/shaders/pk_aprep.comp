@@ -1,0 +1,36 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// Re-layout attention operands as f16 per-head GEMM operands (rows of 128 = head dim):
+//  mode 0 (t, h, d over T*H*128): QU[h*T+t] = q + bias_u, QV[h*T+t] = q + bias_v, KH[h*T+t] = k, VT[h*128+d][t] = v (V transposed, row stride Tk)
+//  mode 1 (r, h, d over (2T-1)*H*128): PH[h*(2T-1)+r] = relative_k_proj(pos)[r]
+//  mode 2 (over H*128*(Tk-T)): zero the VT padding columns t in [T, Tk)
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Y { float y[]; };
+layout(std430, binding = 1) readonly buffer PP { float pp[]; };
+layout(std430, binding = 2) writeonly buffer QU { float16_t qu[]; };
+layout(std430, binding = 3) writeonly buffer QV { float16_t qv[]; };
+layout(std430, binding = 4) writeonly buffer KH { float16_t kh[]; };
+layout(std430, binding = 5) writeonly buffer VT { float16_t vt[]; };
+layout(std430, binding = 6) writeonly buffer PH { float16_t ph[]; };
+layout(std430, binding = 7) readonly buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint mode; uint T; uint H; uint ldq; uint Tk; uint u_off; uint v_off; } pc;
+void main() {
+    uint i = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 256u + gl_LocalInvocationID.x;
+    uint HD = pc.H * 128u;
+    if (pc.mode == 0u) {
+        if (i >= pc.T * HD) return;
+        uint t = i / HD, c = i % HD, h = c >> 7, d = c & 127u, o = (h * pc.T + t) * 128u + d;
+        float q = y[t * pc.ldq + c];
+        qu[o] = float16_t(q + pr[pc.u_off + c]); qv[o] = float16_t(q + pr[pc.v_off + c]);
+        kh[o] = float16_t(y[t * pc.ldq + HD + c]);
+        vt[(h * 128u + d) * pc.Tk + t] = float16_t(y[t * pc.ldq + 2u * HD + c]);
+    } else if (pc.mode == 1u) {
+        uint R = 2u * pc.T - 1u; if (i >= R * HD) return;
+        uint r = i / HD, c = i % HD, h = c >> 7, d = c & 127u;
+        ph[(h * R + r) * 128u + d] = float16_t(pp[i]);
+    } else {
+        uint W = pc.Tk - pc.T; if (i >= HD * W) return;
+        vt[(i / W) * pc.Tk + pc.T + i % W] = float16_t(0.0);
+    }
+}

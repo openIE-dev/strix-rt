@@ -1,0 +1,112 @@
+#version 450
+// Generic decode GEMV, one row per subgroup, LS/subgroup rows per workgroup.
+//   y[y_off+row] (+)= W[row,:] . x  (+ bias)        (Q4K or Q6K)
+//   SWIGLU: y[row] = silu(Wg[row].x) * (Wu[row].x)  (gate at w_off, up at w2_off)
+// XS>1 stages x (K/4 vec4) in shared memory.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+layout(local_size_x_id = 0) in;
+layout(constant_id = 1) const uint XS = 1;
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
+layout(std430, binding = 1) readonly buffer X { vec4 x[]; };
+layout(std430, binding = 2) buffer Y { float y[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint N; uint K; uint w_off; uint w2_off; uint bias_off; uint flags; uint y_off; } pc;
+shared vec4 xs[XS];
+vec4 XV(uint i) { return XS > 1u ? xs[i] : x[i]; }
+
+#ifdef Q4K
+#define ITEMS 4u
+uint byte_of(uvec3 s, uint i) { uint u = i < 4u ? s.x : (i < 8u ? s.y : s.z); return (u >> (8u * (i & 3u))) & 0xFFu; }
+// w_off in uint units
+float item(uint woff, uint row, uint nb, uint it) {
+    uint b = it >> 2u, j = it & 3u;
+    uint base = woff + (row * nb + b) * 36u;
+    vec2 dm = unpackHalf2x16(w[base]);
+    uvec3 s = uvec3(w[base + 1u], w[base + 2u], w[base + 3u]);
+    uint i0 = 2u * j, i1 = i0 + 1u;
+    uint sc0, m0, sc1, m1;
+    if (j < 2u) {
+        sc0 = byte_of(s, i0) & 63u; m0 = byte_of(s, i0 + 4u) & 63u;
+        sc1 = byte_of(s, i1) & 63u; m1 = byte_of(s, i1 + 4u) & 63u;
+    } else {
+        sc0 = (byte_of(s, i0 + 4u) & 0xFu) | ((byte_of(s, i0 - 4u) >> 6) << 4); m0 = (byte_of(s, i0 + 4u) >> 4) | ((byte_of(s, i0) >> 6) << 4);
+        sc1 = (byte_of(s, i1 + 4u) & 0xFu) | ((byte_of(s, i1 - 4u) >> 6) << 4); m1 = (byte_of(s, i1 + 4u) >> 4) | ((byte_of(s, i1) >> 6) << 4);
+    }
+    uint qb = base + 4u + j * 8u;
+    uint xb = (b * 256u + j * 64u) >> 2u;
+    float s0 = 0.0, s1 = 0.0, sx0 = 0.0, sx1 = 0.0;
+    [[unroll]] for (uint k = 0u; k < 8u; k++) {
+        uint q = w[qb + k];
+        vec4 lo = vec4(uvec4(q, q >> 8, q >> 16, q >> 24) & 0xFu);
+        vec4 hi = vec4(uvec4(q >> 4, q >> 12, q >> 20, q >> 28) & 0xFu);
+        vec4 xa = XV(xb + k), xh = XV(xb + 8u + k);
+        s0 += dot(lo, xa); sx0 += dot(xa, vec4(1.0));
+        s1 += dot(hi, xh); sx1 += dot(xh, vec4(1.0));
+    }
+    return dm.x * (float(sc0) * s0 + float(sc1) * s1) - dm.y * (float(m0) * sx0 + float(m1) * sx1);
+}
+#endif
+
+#ifdef Q6K
+#define ITEMS 8u
+// w_off in uint16 units; block = 105 u16
+float item(uint woff, uint row, uint nb, uint it) {
+    uint b = it >> 3u, n = (it >> 2u) & 1u, g = it & 3u;
+    uint base = woff + (row * nb + b) * 105u;
+    float d = unpackHalf2x16(uint(w16[base + 104u])).x;
+    int sh = int((g >> 1u) * 8u);
+    uint sb = base + 96u + n * 4u;
+    float sc0 = float(bitfieldExtract(int(uint(w16[sb])), sh, 8));
+    float sc1 = float(bitfieldExtract(int(uint(w16[sb + 1u])), sh, 8));
+    float sc2 = float(bitfieldExtract(int(uint(w16[sb + 2u])), sh, 8));
+    float sc3 = float(bitfieldExtract(int(uint(w16[sb + 3u])), sh, 8));
+    uint qlb = base + n * 32u + g * 4u, qhb = base + 64u + n * 16u + g * 4u;
+    uint xb = (b * 256u + n * 128u + g * 8u) >> 2u;
+    float s1 = 0.0, s2 = 0.0, s3 = 0.0, s4 = 0.0;
+    [[unroll]] for (uint v = 0u; v < 2u; v++) {
+        uint ua = uint(w16[qlb + 2u * v]) | (uint(w16[qlb + 2u * v + 1u]) << 16);
+        uint uc = uint(w16[qlb + 16u + 2u * v]) | (uint(w16[qlb + 17u + 2u * v]) << 16);
+        uint uh = uint(w16[qhb + 2u * v]) | (uint(w16[qhb + 2u * v + 1u]) << 16);
+        uvec4 A = uvec4(ua, ua >> 8, ua >> 16, ua >> 24), C = uvec4(uc, uc >> 8, uc >> 16, uc >> 24), H = uvec4(uh, uh >> 8, uh >> 16, uh >> 24);
+        vec4 q1 = vec4(ivec4((A & 0xFu) | ((H & 3u) << 4)) - 32);
+        vec4 q2 = vec4(ivec4((C & 0xFu) | (((H >> 2) & 3u) << 4)) - 32);
+        vec4 q3 = vec4(ivec4(((A >> 4) & 0xFu) | (((H >> 4) & 3u) << 4)) - 32);
+        vec4 q4 = vec4(ivec4(((C >> 4) & 0xFu) | (((H >> 6) & 3u) << 4)) - 32);
+        s1 += dot(q1, XV(xb + v)); s2 += dot(q2, XV(xb + 8u + v)); s3 += dot(q3, XV(xb + 16u + v)); s4 += dot(q4, XV(xb + 24u + v));
+    }
+    return d * (sc0 * s1 + sc1 * s2 + sc2 * s3 + sc3 * s4);
+}
+#endif
+
+void main() {
+    if (XS > 1u) { for (uint i = gl_LocalInvocationID.x; i < pc.K / 4u; i += gl_WorkGroupSize.x) xs[i] = x[i]; barrier(); }
+    uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint row = wg * gl_NumSubgroups + gl_SubgroupID;
+    if (row >= pc.N) return;
+    uint nb = pc.K / 256u;
+    float acc = 0.0;
+#ifdef SWIGLU
+    float acc2 = 0.0;
+#endif
+    for (uint it = gl_SubgroupInvocationID; it < nb * ITEMS; it += gl_SubgroupSize) {
+        acc += item(pc.w_off, row, nb, it);
+#ifdef SWIGLU
+        acc2 += item(pc.w2_off, row, nb, it);
+#endif
+    }
+    acc = subgroupAdd(acc);
+#ifdef SWIGLU
+    acc2 = subgroupAdd(acc2);
+    acc = acc / (1.0 + exp(-acc)) * acc2;
+#endif
+    if (subgroupElect()) {
+        if (pc.bias_off != 0xFFFFFFFFu) acc += f32w[pc.bias_off + row];
+        uint o = pc.y_off + row;
+        if ((pc.flags & 1u) != 0u) y[o] += acc; else y[o] = acc;
+    }
+}

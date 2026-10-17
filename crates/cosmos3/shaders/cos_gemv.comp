@@ -1,0 +1,23 @@
+#version 450
+// BF16 GEMV for the single-token und decode: y[y_col + n] = sum_k A[k] * W[n][k] (W bf16 row-major, row = k elements, 16 B aligned).
+// One 256-lane workgroup per output row; each lane reads uvec4 (8 bf16) at stride 256 lanes. A is f16 (packed pairs), y f32.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer W { uvec4 w[]; };
+layout(std430, binding = 1) readonly buffer A { uint a[]; };
+layout(std430, binding = 2) buffer Y { float y[]; };
+layout(push_constant) uniform PC { uint k; uint n; uint w_off16; uint a_off; uint ldy; uint y_col; } pc;
+shared float red[16];
+float bf(uint x) { return uintBitsToFloat(x << 16); }
+float bh(uint x) { return uintBitsToFloat(x & 0xffff0000u); }
+void main() {
+    uint row = gl_WorkGroupID.x, l = gl_LocalInvocationID.x; uint k16 = pc.k / 8u;
+    uint base = pc.w_off16 + row * k16; float s = 0.0;
+    for (uint i = l; i < k16; i += 256u) {
+        uvec4 v = w[base + i]; uint ab = pc.a_off / 2u + i * 4u;
+        vec2 a0 = unpackHalf2x16(a[ab]), a1 = unpackHalf2x16(a[ab + 1u]), a2 = unpackHalf2x16(a[ab + 2u]), a3 = unpackHalf2x16(a[ab + 3u]);
+        s += bf(v.x) * a0.x + bh(v.x) * a0.y + bf(v.y) * a1.x + bh(v.y) * a1.y + bf(v.z) * a2.x + bh(v.z) * a2.y + bf(v.w) * a3.x + bh(v.w) * a3.y;
+    }
+    s = subgroupAdd(s); if (subgroupElect()) red[gl_SubgroupID] = s; barrier();
+    if (l == 0u) { float t = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) t += red[i]; y[pc.y_col + row] = t; }
+}

@@ -1,0 +1,25 @@
+#version 450
+// x f32 [K] -> int8 per group of 32/G values (G = 1, 2, 4 groups per 32-item) for the integer-dot Q4_K pair GEMV (gemvq Q4P bit 3).
+// Words: [0, K/4) packed int8 (item it at it*8), [K/4, +G*K/32) d per group (f32 bits, amax/127), then d*sum(q) per group (same layout).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer X { vec4 x[]; };
+layout(std430, binding = 1) buffer XQ { uint xq[]; };
+layout(push_constant) uniform PC { uint K; uint x_off4; uint G; } pc;
+void main() {
+    uint it = gl_GlobalInvocationID.x, ni = pc.K / 32u;
+    if (it >= ni) return;
+    uint G = pc.G, wpg = 8u / G;   // vec4 words per group
+    for (uint g = 0u; g < G; g++) {
+        vec4 v[8]; float amax = 0.0;
+        for (uint k = 0u; k < wpg; k++) { v[k] = x[pc.x_off4 + it * 8u + g * wpg + k]; vec4 a = abs(v[k]); amax = max(amax, max(max(a.x, a.y), max(a.z, a.w))); }
+        float d = amax / 127.0, id = amax > 0.0 ? 127.0 / amax : 0.0;
+        int sq = 0;
+        for (uint k = 0u; k < wpg; k++) {
+            ivec4 q = clamp(ivec4(roundEven(v[k] * id)), ivec4(-127), ivec4(127));
+            sq += q.x + q.y + q.z + q.w;
+            xq[it * 8u + g * wpg + k] = (uint(q.x) & 255u) | ((uint(q.y) & 255u) << 8) | ((uint(q.z) & 255u) << 16) | ((uint(q.w) & 255u) << 24);
+        }
+        xq[pc.K / 4u + it * G + g] = floatBitsToUint(d);
+        xq[pc.K / 4u + G * ni + it * G + g] = floatBitsToUint(d * float(sq));
+    }
+}

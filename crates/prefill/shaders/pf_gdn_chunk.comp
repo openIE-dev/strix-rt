@@ -1,0 +1,63 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+// Chunked Gated DeltaNet scan (WY/UT form, cf. flash-linear-attention chunk_gated_delta_rule), same bindings and
+// push constants as pf_gdn_scan. Per chunk of C tokens with in-chunk cumulative log decay lg_t (S0 = state at chunk start):
+//   A[t][s] = beta_t (k_t.k_s) e^(lg_t-lg_s) (s<t),   P[t][s] = (q_t.k_s) e^(lg_t-lg_s) (s<=t)
+//   (I + A) v' = beta (v - e^lg S0 k)          (forward substitution, per value row)
+//   o_t = e^lg_t S0 q_t + sum_{s<=t} P[t][s] v'_s,   S = e^lg_C S0 + sum_s e^(lg_C-lg_s) v'_s k_s^T
+// Exact algebraic rewrite of the sequential recurrence; per-row work has no per-token dependency chain.
+// The state-independent terms (lg, beta, A, P) come from the pf_gdn_chunkp pre-pass (binding 5).
+// Workgroup = R value rows of one head (128/R workgroups per head), thread owns state row S[h][i][:].
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint R = 64u;
+layout(constant_id = 1) const uint C = 16u;
+layout(std430, binding = 0) readonly buffer CV { float cv[]; };
+layout(std430, binding = 1) readonly buffer PR { float pr[]; };
+layout(std430, binding = 2) buffer S { vec4 s4[]; };
+layout(std430, binding = 3) writeonly buffer O { float o[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(std430, binding = 5) readonly buffer X { float xw[]; };   // pf_gdn_chunkp output
+layout(push_constant) uniform PC { uint nk; uint nv; uint s_off4; uint a_off; uint b_off; uint dt_off; uint A_off; uint ldp; uint ldc; uint M; } pc;
+shared vec4 ks[C][32]; shared vec4 qs[C][32]; shared float Am[C][C + 1u]; shared float Pm[C][C + 1u]; shared float lg[C]; shared float bet[C];
+void main() {
+    uint gph = 128u / R, h = gl_WorkGroupID.x / gph, lid = gl_LocalInvocationID.x, i = (gl_WorkGroupID.x % gph) * R + lid, kh = h % pc.nk;
+    vec4 s[32];
+    uint sb = pc.s_off4 + (h * 128u + i) * 32u;
+    [[unroll]] for (uint j = 0u; j < 32u; j++) s[j] = s4[sb + j];
+        for (uint t0 = 0u; t0 < pc.M; t0 += C) {
+        uint n = min(C, pc.M - t0);
+        barrier();
+        for (uint x = lid; x < n * 64u; x += R) {
+            uint tt = x >> 6u, e = x & 63u, cb = (t0 + tt) * pc.ldc;
+            if (e < 32u) { uint b = cb + kh * 128u + 4u * e; qs[tt][e] = vec4(cv[b], cv[b + 1u], cv[b + 2u], cv[b + 3u]); }
+            else { uint b = cb + pc.nk * 128u + kh * 128u + 4u * (e - 32u); ks[tt][e - 32u] = vec4(cv[b], cv[b + 1u], cv[b + 2u], cv[b + 3u]); }
+        }
+        uint xb = (h * ((pc.M + C - 1u) / C) + t0 / C) * (2u * C + 2u * C * C);
+        for (uint x = lid; x < n; x += R) { lg[x] = xw[xb + x]; bet[x] = xw[xb + C + x]; }
+        for (uint x = lid; x < n * C; x += R) { uint t = x / C, u = x % C; if (u <= t) { Am[t][u] = xw[xb + 2u * C + x]; Pm[t][u] = xw[xb + 2u * C + C * C + x]; } }
+        barrier();
+        float vp[C], bq[C];
+        [[unroll]] for (uint t = 0u; t < C; t++) {
+            vp[t] = 0.0; bq[t] = 0.0;
+            if (t < n) {
+                vec4 a = vec4(0.0), b = vec4(0.0);
+                [[unroll]] for (uint j = 0u; j < 32u; j++) { a += s[j] * ks[t][j]; b += s[j] * qs[t][j]; }
+                float g = exp(lg[t]);
+                vp[t] = bet[t] * (cv[(t0 + t) * pc.ldc + 2u * pc.nk * 128u + h * 128u + i] - g * (a.x + a.y + a.z + a.w));
+                bq[t] = g * (b.x + b.y + b.z + b.w);
+            }
+        }
+        [[unroll]] for (uint t = 1u; t < C; t++) if (t < n) { float r = vp[t]; [[unroll]] for (uint u = 0u; u < t; u++) r -= Am[t][u] * vp[u]; vp[t] = r; }
+        [[unroll]] for (uint t = 0u; t < C; t++) if (t < n) {
+            float r = bq[t]; [[unroll]] for (uint u = 0u; u <= t; u++) r += Pm[t][u] * vp[u];
+            o[(t0 + t) * pc.nv * 128u + h * 128u + i] = r;
+        }
+        float lc = lg[n - 1u], gc = exp(lc);
+        [[unroll]] for (uint j = 0u; j < 32u; j++) s[j] *= gc;
+        [[unroll]] for (uint u = 0u; u < C; u++) if (u < n) {
+            float c = exp(lc - lg[u]) * vp[u];
+            [[unroll]] for (uint j = 0u; j < 32u; j++) s[j] += c * ks[u][j];
+        }
+    }
+    [[unroll]] for (uint j = 0u; j < 32u; j++) s4[sb + j] = s[j];
+}

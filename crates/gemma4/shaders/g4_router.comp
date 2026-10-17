@@ -1,0 +1,56 @@
+#version 450
+// Gemma 4 MoE router (one workgroup per column y): r = rms(x) / sqrt(K) * s (s = ffn_gate_inp.scale), logits = W r
+// (F32 [n_exp][K], n_exp <= 128), top-k (k <= 8, lowest index on ties), weights = softmax over the k selected logits
+// (= softmax over all experts renormalized over the top-k). ids -> au[440+16y+j], weights -> f[448+16y+j] (gptoss slots).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer F { float f32w[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) buffer AU { uint au[]; };
+layout(std430, binding = 2) buffer AF { float af[]; };
+layout(std430, binding = 3) readonly buffer LG { float lgin[]; };   // pre = 1: logits from g4_rlog
+layout(push_constant) uniform PC { uint w_off; uint s_off; uint K; uint n_exp; uint top_k; float eps; uint x_cs; uint pre; } pc;
+shared float lg[128];
+shared float red[8];
+shared float xs[4096];
+void main() {
+    uint xo = gl_WorkGroupID.y * pc.x_cs, ab = 16u * gl_WorkGroupID.y, t = gl_LocalInvocationID.x;
+    uint L = gl_SubgroupInvocationID, wv = gl_SubgroupID, nw = gl_NumSubgroups;
+    if (pc.pre == 1u) { for (uint e = t; e < pc.n_exp; e += 256u) lg[e] = lgin[gl_WorkGroupID.y * 128u + e]; }
+    else {
+    float ss = 0.0;
+    for (uint i = t; i < pc.K; i += 256u) { float v = x[xo + i]; ss += v * v; }
+    ss = subgroupAdd(ss);
+    if (subgroupElect()) red[wv] = ss;
+    barrier();
+    float tot = 0.0; for (uint i = 0u; i < nw; i++) tot += red[i];
+    float sc = inversesqrt(tot / float(pc.K) + pc.eps) * inversesqrt(float(pc.K));
+    for (uint i = t; i < pc.K; i += 256u) xs[i] = x[xo + i] * sc * f32w[pc.s_off + i];
+    barrier();
+    for (uint e = wv; e < pc.n_exp; e += nw) {
+        float s = 0.0;
+        for (uint i = L; i < pc.K; i += gl_SubgroupSize) s += f32w[pc.w_off + e * pc.K + i] * xs[i];
+        s = subgroupAdd(s);
+        if (subgroupElect()) lg[e] = s;
+    }
+    }
+    barrier();
+    // top-k on subgroup 0: each lane holds experts lane + 32 i (n_exp <= 128); k rounds of subgroupMax, lowest index on ties
+    if (wv == 0u) {
+        float lv[4]; bool used[4];
+        for (uint i = 0u; i < 4u; i++) { uint e = L + 32u * i; lv[i] = e < pc.n_exp ? lg[e] : -3.4e38; used[i] = e >= pc.n_exp; }
+        float m0 = 0.0, sum = 0.0, vs[8]; uint ids[8];
+        for (uint j = 0u; j < pc.top_k; j++) {
+            float bv = -3.4e38; uint bi = 0xFFFFFFFFu;
+            for (uint i = 0u; i < 4u; i++) if (!used[i] && (lv[i] > bv || bi == 0xFFFFFFFFu)) { bv = lv[i]; bi = L + 32u * i; }
+            float mx = subgroupMax(bi == 0xFFFFFFFFu ? -3.4e38 : bv);
+            uint win = subgroupMin((bi != 0xFFFFFFFFu && bv == mx) ? bi : 0xFFFFFFFFu);
+            if (win % 32u == L) used[win / 32u] = true;
+            ids[j] = win; vs[j] = mx;
+        }
+        m0 = vs[0];
+        for (uint j = 0u; j < pc.top_k; j++) { vs[j] = exp(vs[j] - m0); sum += vs[j]; }
+        if (L == 0u) for (uint j = 0u; j < pc.top_k; j++) { au[440u + ab + j] = ids[j]; af[448u + ab + j] = vs[j] / sum; }
+    }
+}

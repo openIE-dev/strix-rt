@@ -1,0 +1,40 @@
+#version 450
+// Mamba-2 selective-state decode step, one workgroup per SSM head, one lane per state dim (d_state = 128).
+// dt = softplus(dt_raw + dt_bias); dA = exp(dt * A); s[p][n] = s[p][n] * dA + B[n] * x[p] * dt; y[p] = sum_n s[p][n] C[n]
+// then y = (y + D * x) * silu(z). State layout [head][p][n] f32.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const uint HD = 80u;
+layout(std430, binding = 0) readonly buffer Z { float zx[]; };
+layout(std430, binding = 1) readonly buffer XB { float xbc[]; };
+layout(std430, binding = 2) buffer S { float st[]; };
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+layout(std430, binding = 4) readonly buffer F { float f[]; };
+layout(std430, binding = 5) writeonly buffer S2 { float st2[]; };
+layout(push_constant) uniform PC { uint d_inner; uint n_group; uint n_head; uint st_off; uint a_off; uint d_off; uint dtb_off; uint dt_off; } pc;
+shared float xs[HD];
+shared float red[HD][4];
+void main() {
+    uint h = gl_WorkGroupID.x, n = gl_LocalInvocationID.x, g = h / (pc.n_head / pc.n_group);
+    float Bn = xbc[pc.d_inner + g * 128u + n], Cn = xbc[pc.d_inner + pc.n_group * 128u + g * 128u + n];
+    for (uint i = n; i < HD; i += 128u) xs[i] = xbc[h * HD + i];
+    float dt = zx[pc.dt_off + h] + f[pc.dtb_off + h];
+    dt = dt <= 20.0 ? log(1.0 + exp(dt)) : dt;
+    float dA = exp(dt * f[pc.a_off + h]);
+    barrier();
+    uint base = pc.st_off + h * HD * 128u + n;
+    for (uint p = 0u; p < HD; p++) {
+        float v = st[base + p * 128u] * dA + Bn * (xs[p] * dt);
+        st2[base + p * 128u] = v;
+        float r = subgroupAdd(v * Cn);
+        if (subgroupElect()) red[p][gl_SubgroupID] = r;
+    }
+    barrier();
+    for (uint p = n; p < HD; p += 128u) {
+        float a = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) a += red[p][i];
+        a += xs[p] * f[pc.d_off + h];
+        float z = zx[h * HD + p];
+        y[h * HD + p] = a * (z / (1.0 + exp(-z)));
+    }
+}

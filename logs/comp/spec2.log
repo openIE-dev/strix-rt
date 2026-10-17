@@ -1,0 +1,29 @@
+=== 2026-10-15T12:14:59Z bash -c source tools/comp/rocm713.env; tools/comp/spec.sh ~/llama-latest/build-rocm713/bin hip_q38_base $MODELS/Qwen3.8-27B-UD-Q4_K_M.gguf "[760, 3712, 314, 279, 12386, 19825, 628, 381, 66307, 430, 10695, 25]"; for k in 1 2 3; do tools/comp/spec.sh ~/llama-latest/build-rocm713/bin hip_q38_mtp$k $MODELS/Qwen3.8-27B-UD-Q4_K_M.gguf "[760, 3712, 314, 279, 12386, 19825, 628, 381, 66307, 430, 10695, 25]" --spec-type draft-mtp --spec-draft-n-max $k; done
+12:15:01 busy: 382898 100.5 mcv_ref
+12:15:34 quiet
+perf level: high
+SPEC hip_q38_base run 0: decode 12.78 tok/s 128 tok, draft None accepted None
+SPEC hip_q38_base run 1: decode 12.79 tok/s 128 tok, draft None accepted None
+SPEC hip_q38_base run 2: decode 12.79 tok/s 128 tok, draft None accepted None
+SPEC hip_q38_base run 3: decode 12.75 tok/s 128 tok, draft None accepted None
+SPEC hip_q38_mtp1 run 0: decode 20.64 tok/s 128 tok, draft 67 accepted 59
+SPEC hip_q38_mtp1 run 1: decode 20.68 tok/s 128 tok, draft 67 accepted 59
+SPEC hip_q38_mtp1 run 2: decode 20.67 tok/s 128 tok, draft 67 accepted 59
+SPEC hip_q38_mtp1 run 3: decode 20.55 tok/s 128 tok, draft 67 accepted 59
+SPEC hip_q38_mtp2 run 0: decode 23.68 tok/s 128 tok, draft 108 accepted 73
+SPEC hip_q38_mtp2 run 1: decode 23.67 tok/s 128 tok, draft 108 accepted 73
+SPEC hip_q38_mtp2 run 2: decode 22.2 tok/s 128 tok, draft 108 accepted 73
+SPEC hip_q38_mtp2 run 3: decode 20.24 tok/s 128 tok, draft 108 accepted 73
+SPEC hip_q38_mtp3 run 0: decode 23.59 tok/s 128 tok, draft 137 accepted 81
+SPEC hip_q38_mtp3 run 1: decode 20.5 tok/s 128 tok, draft 137 accepted 81
+SPEC hip_q38_mtp3 run 2: decode 19.07 tok/s 128 tok, draft 137 accepted 81
+SPEC hip_q38_mtp3 run 3: decode 18.65 tok/s 128 tok, draft 137 accepted 81
+=== rc 0 2026-10-15T12:21:29Z
+=== 2026-10-15T12:21:29Z bash -c tools/comp/spec.sh ~/llama-latest/build-vulkan/bin vk_gptoss_base $MODELS/bench/gpt-oss-20b-MXFP4.gguf ; tools/comp/spec.sh ~/llama-latest/build-vulkan/bin vk_gptoss_eagle3 $MODELS/bench/gpt-oss-20b-MXFP4.gguf  --spec-type draft-eagle3 -md $MODELS/bench/eagle3-gpt-oss-20b-Q8_0.gguf -ngld 999
+12:21:31 quiet
+perf level: high
+SPEC vk_gptoss_base: server exited
+error: invalid argument: ~/llama-latest/build-vulkan/bin
+SPEC vk_gptoss_eagle3: server exited
+error: invalid argument: draft-eagle3
+=== rc 1 2026-10-15T12:34:32Z

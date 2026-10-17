@@ -1,0 +1,26 @@
+#version 450
+// ViT merger window attention: each token attends to the 4 tokens of its 2x2 window (row-major grid Hp x Wp).
+// Y f32 [n][ldy] holds q|k|v (+bias) at cols 0, dm, 2dm; out f16 A16 [n][dm]. One thread per (token, head).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Y { float y[]; };
+layout(std430, binding = 1) writeonly buffer A { float16_t a[]; };
+layout(push_constant) uniform PC { uint Hp; uint Wp; uint H; uint hd; uint ldy; float scale; } pc;
+void main() {
+    uint g = gl_GlobalInvocationID.x, n = pc.Hp * pc.Wp;
+    if (g >= n * pc.H) return;
+    uint t = g / pc.H, h = g - t * pc.H, r = t / pc.Wp, c = t - r * pc.Wp, dm = pc.H * pc.hd;
+    uint w[4]; w[0] = (r & ~1u) * pc.Wp + (c & ~1u); w[1] = w[0] + 1u; w[2] = w[0] + pc.Wp; w[3] = w[2] + 1u;
+    float s[4]; float mx = -3.4e38;
+    for (uint j = 0u; j < 4u; j++) {
+        float d = 0.0;
+        for (uint i = 0u; i < pc.hd; i++) d += y[t * pc.ldy + h * pc.hd + i] * y[w[j] * pc.ldy + dm + h * pc.hd + i];
+        s[j] = d * pc.scale; mx = max(mx, s[j]);
+    }
+    float tot = 0.0; for (uint j = 0u; j < 4u; j++) { s[j] = exp(s[j] - mx); tot += s[j]; }
+    for (uint i = 0u; i < pc.hd; i++) {
+        float o = 0.0; for (uint j = 0u; j < 4u; j++) o += s[j] * y[w[j] * pc.ldy + 2u * dm + h * pc.hd + i];
+        a[t * dm + h * pc.hd + i] = float16_t(o / tot);
+    }
+}

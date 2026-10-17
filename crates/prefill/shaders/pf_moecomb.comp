@@ -1,0 +1,22 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+// MoE combine: X[t][i] += sum_s w[t,s] * Yd[inv[t*tk+s]][i]. r = route output (weights at M*tk), g = [src | inv].
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Y { float yd[]; };
+layout(std430, binding = 2) readonly buffer R { uint r[]; };
+layout(std430, binding = 3) readonly buffer I { uint g[]; };
+layout(push_constant) uniform PC { uint dim; uint M; uint tk; } pc;
+void main() {
+    uint idx = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 256u + gl_LocalInvocationID.x;
+    if (idx >= pc.dim * pc.M) return;
+    uint t = idx / pc.dim, i = idx - t * pc.dim, n = pc.M * pc.tk;
+    float s = 0.0;
+    for (uint j = 0u; j < pc.tk; j++) { uint q = t * pc.tk + j; s += uintBitsToFloat(r[n + q]) * yd[g[n + q] * pc.dim + i]; }
+    x[idx] += s;
+}

@@ -1,0 +1,29 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+// Rel-pos attention softmax, one workgroup per (query i, head h):
+//   s_j = scale * (AC[i][h*T + j] + BD[i][h*(2T-1) + T-1-i+j]),  PA[(h*T + i)*Tk + j] = f16(softmax_j(s)), zero for j in [T, Tk)
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer AC { float ac[]; };
+layout(std430, binding = 1) readonly buffer BD { float bd[]; };
+layout(std430, binding = 2) writeonly buffer PA { float16_t pa[]; };
+layout(push_constant) uniform PC { uint T; uint H; uint Tk; float scale; } pc;
+const uint MAXT = 4096u;
+shared float sc[MAXT]; shared float red[16];
+void main() {
+    uint g = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint i = g / pc.H, h = g % pc.H, tid = gl_LocalInvocationID.x, R = 2u * pc.T - 1u;
+    uint ab = i * pc.H * pc.T + h * pc.T, bb = i * pc.H * R + h * R + pc.T - 1u - i;
+    float mx = -3.4e38;
+    for (uint j = tid; j < pc.T; j += 256u) { float s = pc.scale * (ac[ab + j] + bd[bb + j]); sc[j] = s; mx = max(mx, s); }
+    mx = subgroupMax(mx); if (subgroupElect()) red[gl_SubgroupID] = mx; barrier();
+    mx = red[0]; for (uint k = 1u; k < gl_NumSubgroups; k++) mx = max(mx, red[k]); barrier();
+    float sum = 0.0;
+    for (uint j = tid; j < pc.T; j += 256u) { float e = exp(sc[j] - mx); sc[j] = e; sum += e; }
+    sum = subgroupAdd(sum); if (subgroupElect()) red[gl_SubgroupID] = sum; barrier();
+    sum = 0.0; for (uint k = 0u; k < gl_NumSubgroups; k++) sum += red[k];
+    float inv = 1.0 / sum; uint ob = (h * pc.T + i) * pc.Tk;
+    for (uint j = tid; j < pc.Tk; j += 256u) pa[ob + j] = float16_t(j < pc.T ? sc[j] * inv : 0.0);
+}

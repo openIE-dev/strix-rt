@@ -1,0 +1,45 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+// Relative-position MHA (Transformer-XL, as HF ParakeetEncoderAttention), head dim 128, one workgroup per (query i, head h):
+//   s_ij = scale * ((q_i + u_h).k_j + (q_i + v_h).p_{T-1-i+j}),  softmax_j,  out_i = sum_j p_ij v_j  -> f16 A[i*lda + h*128 + d]
+// Y = [q | k | v] rows of ldq floats; Pp = relative_k_proj(pos) [2T-1][H*128] with row k <-> relative position T-1-k.
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer Y { float y[]; };
+layout(std430, binding = 1) readonly buffer PP { float pp[]; };
+layout(std430, binding = 2) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 3) readonly buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint T; uint H; uint ldq; uint u_off; uint v_off; float scale; uint lda; } pc;
+const uint MAXT = 4096u;
+shared float sc[MAXT]; shared vec4 qu[32]; shared vec4 qv[32]; shared float red[4];
+void main() {
+    uint g = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint i = g / pc.H, h = g % pc.H, d = gl_LocalInvocationID.x, HD = pc.H * 128u;
+    float q = y[i * pc.ldq + h * 128u + d];
+    float a1 = q + pr[pc.u_off + h * 128u + d], a2 = q + pr[pc.v_off + h * 128u + d];
+    qu[d >> 2][d & 3u] = a1; qv[d >> 2][d & 3u] = a2;
+    barrier();
+    float mx = -3.4e38;
+    for (uint j = d; j < pc.T; j += 128u) {
+        uint kb = (j * pc.ldq + HD + h * 128u) >> 2, pb = ((pc.T - 1u - i + j) * HD + h * 128u) >> 2;
+        float s = 0.0;
+        for (uint e = 0u; e < 32u; e++) {
+            uint kq = kb + e, pq = pb + e;
+            vec4 kk = vec4(y[4u * kq], y[4u * kq + 1u], y[4u * kq + 2u], y[4u * kq + 3u]);
+            vec4 pv = vec4(pp[4u * pq], pp[4u * pq + 1u], pp[4u * pq + 2u], pp[4u * pq + 3u]);
+            s += dot(qu[e], kk) + dot(qv[e], pv);
+        }
+        s *= pc.scale; sc[j] = s; mx = max(mx, s);
+    }
+    mx = subgroupMax(mx); if (subgroupElect()) red[gl_SubgroupID] = mx; barrier();
+    mx = red[0]; for (uint k = 1u; k < gl_NumSubgroups; k++) mx = max(mx, red[k]); barrier();
+    float sum = 0.0;
+    for (uint j = d; j < pc.T; j += 128u) { float e = exp(sc[j] - mx); sc[j] = e; sum += e; }
+    sum = subgroupAdd(sum); if (subgroupElect()) red[gl_SubgroupID] = sum; barrier();
+    sum = 0.0; for (uint k = 0u; k < gl_NumSubgroups; k++) sum += red[k];
+    float o = 0.0;
+    for (uint j = 0u; j < pc.T; j++) o += sc[j] * y[j * pc.ldq + 2u * HD + h * 128u + d];
+    a[i * pc.lda + h * 128u + d] = float16_t(o / sum);
+}

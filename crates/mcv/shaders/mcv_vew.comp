@@ -1,0 +1,32 @@
+#version 450
+// Vision element-wise ops over rows x d (one thread per element):
+//  0: X = Y + P[b] + P[aux + IDX[r] * d]      (patch embedding + bias + learned position embedding)
+//  1: X += Y + P[b]                           (residual add with bias)
+//  2: O16 = f16(gelu_tanh(Y + P[b]))
+//  3: O16 = f16(gelu_erf(Y + P[b]))
+//  4: X = Y + P[b]                            (copy with bias)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Y { float y[]; };
+layout(std430, binding = 2) writeonly buffer O16 { float16_t o16[]; };
+layout(std430, binding = 3) readonly buffer P { float p[]; };
+layout(std430, binding = 4) readonly buffer I { uint idx[]; };
+layout(push_constant) uniform PC { uint mode; uint n; uint d; uint ldx; uint ldy; uint ldo; uint b_off; uint aux; } pc;
+float erf_(float z) { // Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7)
+    float s = sign(z), a = abs(z), t = 1.0 / (1.0 + 0.3275911 * a);
+    float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-a * a);
+    return s * y;
+}
+void main() {
+    uint g = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u;
+    if (g >= pc.n * pc.d) return;
+    uint r = g / pc.d, c = g - r * pc.d;
+    float v = y[r * pc.ldy + c] + p[pc.b_off + c];
+    if (pc.mode == 0u) x[r * pc.ldx + c] = v + p[pc.aux + idx[r] * pc.d + c];
+    else if (pc.mode == 1u) x[r * pc.ldx + c] += v;
+    else if (pc.mode == 2u) { float u = 0.7978845608028654 * (v + 0.044715 * v * v * v); o16[r * pc.ldo + c] = float16_t(0.5 * v * (1.0 + tanh(u))); }
+    else if (pc.mode == 3u) o16[r * pc.ldo + c] = float16_t(0.5 * v * (1.0 + erf_(v * 0.7071067811865476)));
+    else x[r * pc.ldx + c] = v;
+}

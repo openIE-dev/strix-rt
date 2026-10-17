@@ -1,0 +1,19 @@
+#version 450
+// MoE router logits: p[e] = sigmoid(Wg[e] . rmsnorm(x)) -> sq[176+e] (wide aux layout). One wave32 per expert.
+// Top-k selection happens inside the expert GEMVs (gemv3 moe_select), so no serial pass and no extra barrier.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer F4 { vec4 f32w4[]; };
+layout(std430, binding = 1) readonly buffer XW { vec4 xw4[]; };
+layout(std430, binding = 2) buffer A { float sq[]; };
+layout(push_constant) uniform PC { uint w_off; uint b_off; uint K; uint n_exp; uint slot; float eps; uint top_k; float w_scale; } pc;
+void main() {
+    uint e = gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID;
+    if (e >= pc.n_exp) return;
+    uint k4 = pc.K >> 2, wb = (pc.w_off >> 2) + e * k4;
+    float a = 0.0;
+    for (uint k = gl_SubgroupInvocationID; k < k4; k += gl_SubgroupSize) a += dot(f32w4[wb + k], xw4[k]);
+    a = subgroupAdd(a) * inversesqrt(sq[pc.slot] / float(pc.K) + pc.eps);
+    if (subgroupElect()) sq[176u + e] = 1.0 / (1.0 + exp(-a));
+}

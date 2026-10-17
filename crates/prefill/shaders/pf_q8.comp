@@ -1,0 +1,32 @@
+#version 450
+// q8_1-style activation quant for pf_qgemm: per (row m, 32-block g) of f16 activations:
+//   s = amax/127, q = round(x/s) (int8), xq[m*K + k] = q, xs[g*ldx + m] = s, xu[g*ldx + m] = s * sum(q).
+// xs/xu are stored transposed ([K/32][ldx]) so the GEMM can broadcast-load a 16-token column with stride 0.
+// Rows in [M, ldx) are written as zeros (padding for full-tile A loads).
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer A { uvec4 a4[]; };
+layout(std430, binding = 1) writeonly buffer XQ { uint xq[]; };
+layout(std430, binding = 2) writeonly buffer XS { float xs[]; };
+layout(std430, binding = 3) writeonly buffer XU { float xu[]; };
+layout(push_constant) uniform PC { uint M; uint K; uint lda; uint ldx; } pc;
+void main() {
+    const uint G = pc.K / 32u, i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u;
+    if (i >= pc.ldx * G) return;
+    const uint m = i / G, g = i % G;
+    const uint ob = (m * pc.K + g * 32u) / 4u;
+    if (m >= pc.M) { [[unroll]] for (uint k = 0u; k < 8u; k++) xq[ob + k] = 0u; xs[g * pc.ldx + m] = 0.0; xu[g * pc.ldx + m] = 0.0; return; }
+    vec2 v[16]; float amax = 0.0;
+    const uint ib = (m * pc.lda + g * 32u) / 8u;
+    [[unroll]] for (uint k = 0u; k < 4u; k++) { uvec4 u = a4[ib + k];
+        v[4u * k] = unpackHalf2x16(u.x); v[4u * k + 1u] = unpackHalf2x16(u.y); v[4u * k + 2u] = unpackHalf2x16(u.z); v[4u * k + 3u] = unpackHalf2x16(u.w); }
+    [[unroll]] for (uint k = 0u; k < 16u; k++) amax = max(amax, max(abs(v[k].x), abs(v[k].y)));
+    const float s = amax / 127.0, is = amax > 0.0 ? 127.0 / amax : 0.0;
+    int sum = 0;
+    [[unroll]] for (uint k = 0u; k < 8u; k++) {
+        ivec4 q = ivec4(round(vec4(v[2u * k], v[2u * k + 1u]) * is));
+        sum += q.x + q.y + q.z + q.w;
+        xq[ob + k] = (uint(q.x) & 255u) | ((uint(q.y) & 255u) << 8) | ((uint(q.z) & 255u) << 16) | ((uint(q.w) & 255u) << 24);
+    }
+    xs[g * pc.ldx + m] = s; xu[g * pc.ldx + m] = s * float(sum);
+}

@@ -1,0 +1,23 @@
+11:15:00 quiet
+lgemv ffn_latent_down.weight [1024x4096] Q4_0: rel err 1.01e-6  y[..3] gpu [1.482373, -1.3686264, -0.93964064] cpu [1.4823725, -1.3686264, -0.93964344]
+lgemv ffn_latent_up.weight [4096x1024] Q4_0: rel err 5.54e-7  y[..3] gpu [-0.26795635, -0.15455854, -0.10734373] cpu [-0.26795664, -0.15455852, -0.107343614]
+router NaN input: ids all < 512: true (ids[..4] [0, 1, 2, 3])
+router: ids match true | weights rel err 7.66e-8 | gpu ids[..6] [469, 382, 55, 122, 298, 459] cpu [469, 382, 55, 122, 298, 459]
+expert up relu^2 [22x2688]: rel err 1.03e-6 | expert down -> latent [1024]: rel err 4.42e-7
+perf level: high
+step 56.598 ms, 535 segments
+                mamba.ssm_in   16.327 ms  28.8%  x40
+         moe.moe_dn+shexp_dn   11.068 ms  19.6%  x40
+moe.router+shexp_up+lat_down    8.784 ms  15.5%  x80
+               mamba.ssm_out    6.908 ms  12.2%  x40
+                  moe.moe_up    6.164 ms  10.9%  x40
+                head.lm_head    1.976 ms   3.5%  x4
+                   attn.norm    1.905 ms   3.4%  x48
+                  mamba.scan    1.405 ms   2.5%  x40
+                  moe.lat_up    0.591 ms   1.0%  x40
+                    moe.norm    0.445 ms   0.8%  x40
+                  mamba.norm    0.390 ms   0.7%  x40
+                 mamba.gnorm    0.352 ms   0.6%  x40
+                  mamba.conv    0.259 ms   0.5%  x40
+                 embed.start    0.014 ms   0.0%  x2
+                   head.norm    0.010 ms   0.0%  x1

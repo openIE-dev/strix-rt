@@ -1,0 +1,20 @@
+[start 20:02:10]
+| qwen35 27B Q4_K - Medium       |  15.32 GiB |    27.32 B | Vulkan     |  99 |           pp512 |       392.39 ± 15.91 |
+| qwen35 27B Q4_K - Medium       |  15.32 GiB |    27.32 B | Vulkan     |  99 |          pp2048 |       393.49 ± 18.78 |
+[busy after: YES]
+| lfm2moe 24B.A2B Q4_K - Medium  |  13.52 GiB |    23.97 B | Vulkan     |  99 |           pp512 |      2270.94 ± 44.12 |
+| lfm2moe 24B.A2B Q4_K - Medium  |  13.52 GiB |    23.97 B | Vulkan     |  99 |          pp2048 |      2275.99 ± 12.13 |
+[busy after: no]
+pf_q38 pp512 PF_KS=1 PF_MSEL=0 PF_GBM2=32 PF_MSWI=0 PF_LPS=8 PF_G32N=256 PF_WIDE_RPE=100000 : prefill 512: best 1082.1 ms (all [1094, 1084, 1082, 1082, 1082, 1107]) -> pp512 473.15 tok/s [busy after: no]
+pf_q38 pp512  : prefill 512: best 961.1 ms (all [982, 965, 964, 963, 961, 965]) -> pp512 532.75 tok/s [busy after: no]
+pf_lfm pp512 PF_KS=1 PF_MSEL=0 PF_GBM2=32 PF_MSWI=0 PF_LPS=8 PF_G32N=256 PF_WIDE_RPE=100000 : prefill 512: best 248.5 ms (all [250, 250, 248, 254, 258, 256]) -> pp512 2060.76 tok/s [busy after: YES]
+pf_lfm pp512  : prefill 512: best 224.6 ms (all [225, 224, 225, 225, 224, 224]) -> pp512 2280.04 tok/s [busy after: no]
+pf_q38 pp2048 PF_KS=1 PF_MSEL=0 PF_GBM2=32 PF_MSWI=0 PF_LPS=8 PF_G32N=256 PF_WIDE_RPE=100000 : prefill 2048: best 5441.0 ms (all [5483, 5441, 5486, 5458, 5472, 5523]) -> pp2048 376.40 tok/s [busy after: no]
+pf_q38 pp2048  : prefill 2048: best 4460.9 ms (all [4460, 4494, 4528, 4564, 4587, 4616]) -> pp2048 459.10 tok/s [busy after: no]
+pf_lfm pp2048 PF_KS=1 PF_MSEL=0 PF_GBM2=32 PF_MSWI=0 PF_LPS=8 PF_G32N=256 PF_WIDE_RPE=100000 : prefill 2048: best 859.9 ms (all [867, 861, 859, 864, 863, 868]) -> pp2048 2381.65 tok/s [busy after: no]
+pf_lfm pp2048  : prefill 2048: best 842.1 ms (all [883, 842, 844, 845, 846, 848]) -> pp2048 2431.96 tok/s [busy after: no]
+lfm2 before L=512:   pf  [10932, 229, 25, 23, 26, 229, 25, 23]
+lfm2 after L=512:   pf  [10932, 229, 25, 23, 26, 229, 25, 23]
+lfm2 before L=2048:   pf  [816, 229, 26, 22, 26, 22, 26, 22]
+lfm2 after L=2048:   pf  [816, 229, 26, 22, 26, 22, 26, 22]
+restored auto [end 20:09:00]

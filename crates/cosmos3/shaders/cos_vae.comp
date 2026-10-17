@@ -1,0 +1,54 @@
+#version 450
+// Video VAE elementwise ops (Wan2.2 decoder on frame sequences). Activations are channel-last, frames stacked:
+// pixel index p = (f * H + y) * W + x, element p * C + c. Grid-stride over i < n.
+//  0 im2col for a causal conv (KT x KS x KS, KT in {1,3}, KS in {1,3}): B[i], i = p*kpad + k, k = ((kt*KS + ky)*KS + kx)*C + c,
+//    source f16 A[(aoff + (sf*H + sy)*W + sx)*C + c] with sf = f + kt - (KT-1) (zero when sf < 0: causal front padding),
+//    spatial zero padding KS/2. flags = KT | KS << 2. p = p0 + i / kpad.
+//  1 store chunk: X[(p0 + p)*C + c] = (flags&1 ? X[..] : 0) + Y[p*C2 + c] + P[b_off + c]
+//  2 f32 -> f16: B[i] = X[p0 + i]
+//  3 nearest x2 spatial upsample of the frame stack (H = rows of all frames): Y[i] = X[((oy>>1)*W + (ox>>1))*C + c]
+//  4 DupUp3D shortcut, ft = flags: X[i] += Y[src], output frame o: o==0 <- (k 0, s ft-1), else k = (o-1)/ft + 1, s = (o-1)%ft;
+//    j = s*4 + (oy&1)*2 + (ox&1), channel src = (c*ft*4 + j) / (C*ft*4/C2) of input pixel (k, oy/2, ox/2) (input W, H, C2 channels)
+//  5 time_conv interleave: X[((1 + 2t + g)*H*W + q)*C + c] = Y[(t*H*W + q)*2C + g*C + c]  (i over (T-1)*2*H*W*C)
+//  6 copy: X[p0 + i] = Y[i]
+//  7 f16 copy: B[p0 + i] = A[aoff + i] (temporal-chunk conv caches)
+// pad1 = 1 (a later temporal chunk, no clip frame 0): mode 4 without the first-frame rule, mode 5 writes from frame 0.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) buffer Y { float y[]; };
+layout(std430, binding = 2) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 3) writeonly buffer B { float16_t b[]; };
+layout(std430, binding = 4) readonly buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint mode; uint n; uint C; uint W; uint H; uint p0; uint b_off; uint flags; uint C2; uint kpad; uint aoff; uint pad1; } pc;
+void op(uint i) {
+    if (pc.mode == 0u) {
+        uint p = pc.p0 + i / pc.kpad, k = i % pc.kpad; float16_t v = float16_t(0.0);
+        uint KT = pc.flags & 3u, KS = (pc.flags >> 2) & 3u, tap = k / pc.C, c = k - tap * pc.C;
+        if (tap < KT * KS * KS) {
+            uint hw = pc.H * pc.W, f = p / hw, q = p - f * hw, yy0 = q / pc.W, xx0 = q - yy0 * pc.W;
+            uint kt = tap / (KS * KS), r = tap - kt * KS * KS, ky = r / KS, kx = r - ky * KS;
+            int sf = int(f) + int(kt) - int(KT - 1u), sy = int(yy0) + int(ky) - int(KS / 2u), sx = int(xx0) + int(kx) - int(KS / 2u);
+            if (sf >= 0 && sy >= 0 && sy < int(pc.H) && sx >= 0 && sx < int(pc.W)) v = a[(pc.aoff + (uint(sf) * pc.H + uint(sy)) * pc.W + uint(sx)) * pc.C + c];
+        }
+        b[i] = v;
+    } else if (pc.mode == 1u) {
+        uint p = i / pc.C, c = i - p * pc.C, o = (pc.p0 + p) * pc.C + c;
+        x[o] = ((pc.flags & 1u) != 0u ? x[o] : 0.0) + y[p * pc.C2 + c] + pr[pc.b_off + c];
+    } else if (pc.mode == 2u) { b[i] = float16_t(x[pc.p0 + i]); }
+    else if (pc.mode == 3u) {
+        uint c = i % pc.C, q = i / pc.C, ox = q % (2u * pc.W), oy = q / (2u * pc.W);
+        y[i] = x[((oy >> 1) * pc.W + (ox >> 1)) * pc.C + c];
+    } else if (pc.mode == 4u) {
+        uint c = i % pc.C, q = i / pc.C, W2 = 2u * pc.W, H2 = 2u * pc.H, ox = q % W2, oy = (q / W2) % H2, o = q / (W2 * H2);
+        uint ft = pc.flags, k = 0u, s = ft - 1u; if (pc.pad1 != 0u) { k = o / ft; s = o % ft; } else if (o > 0u) { k = (o - 1u) / ft + 1u; s = (o - 1u) % ft; }
+        uint rep = pc.C * ft * 4u / pc.C2, j = s * 4u + (oy & 1u) * 2u + (ox & 1u), src = (c * ft * 4u + j) / rep;
+        x[i] += y[((k * pc.H + (oy >> 1)) * pc.W + (ox >> 1)) * pc.C2 + src];
+    } else if (pc.mode == 5u) {
+        uint hw = pc.H * pc.W, c = i % pc.C, q0 = i / pc.C, q = q0 % hw, tg = q0 / hw, g = tg & 1u, t = tg >> 1;
+        x[(((pc.pad1 != 0u) ? 0u : 1u) + 2u * t + g) * hw * pc.C + q * pc.C + c] = y[(t * hw + q) * 2u * pc.C + g * pc.C + c];
+    } else if (pc.mode == 6u) { x[pc.p0 + i] = y[i]; }
+    else if (pc.mode == 7u) { b[pc.p0 + i] = a[pc.aoff + i]; }
+}
+void main() { for (uint i = gl_WorkGroupID.x * 256u + gl_LocalInvocationID.x; i < pc.n; i += gl_NumWorkGroups.x * 256u) op(i); }

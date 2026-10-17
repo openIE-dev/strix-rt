@@ -1,0 +1,13 @@
+#version 450
+// flash output f16 [n][16*128] (padded heads) -> GEMM input A f16 [n][lda], 96 dims per head
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer O { float16_t o[]; };
+layout(std430, binding = 1) writeonly buffer A { float16_t a[]; };
+layout(push_constant) uniform PC { uint lda; } pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x, t = gl_WorkGroupID.y;
+    if (i >= 1536u) return;
+    a[t * pc.lda + i] = o[t * 2048u + (i / 96u) * 128u + i % 96u];
+}

@@ -1,0 +1,48 @@
+== pf_q38 L=512 PF_SWI_ADIR=1
+top5 ref logits pf [3.4008057, 3.3695123, 3.317903, 3.1561546, 3.0308075] ref [3.4023077, 3.372114, 3.3143713, 3.156743, 3.0322468]
+L=512: logits max|diff| 0.0069 (max|ref| 11.96), argmax pf 286 ref 286, first tok 286
+greedy continuation agreement 16/16
+  pf  [286, 62, 198, 248044, 2, 198, 2, 198, 2, 198, 2, 198, 2, 198, 2, 198]
+  ref [286, 62, 198, 248044, 2, 198, 2, 198, 2, 198, 2, 198, 2, 198, 2, 198]
+prefill 512 tokens: 959.2 ms -> pp512 533.77 tok/s   (token-by-token generate incl. 16 new: 38658.8 ms)
+== pf_q38 L=512 PF_SWI_ADIR=0
+top5 ref logits pf [3.4008057, 3.3695123, 3.317903, 3.1561546, 3.0308075] ref [3.4023077, 3.372114, 3.3143713, 3.156743, 3.0322468]
+L=512: logits max|diff| 0.0069 (max|ref| 11.96), argmax pf 286 ref 286, first tok 286
+greedy continuation agreement 16/16
+  pf  [286, 62, 198, 248044, 2, 198, 2, 198, 2, 198, 2, 198, 2, 198, 2, 198]
+  ref [286, 62, 198, 248044, 2, 198, 2, 198, 2, 198, 2, 198, 2, 198, 2, 198]
+prefill 512 tokens: 1084.2 ms -> pp512 472.25 tok/s   (token-by-token generate incl. 16 new: 38555.9 ms)
+== pf_q38 L=2048 PF_SWI_ADIR=1
+top5 ref logits pf [3.7437592, 3.168367, 3.089751, 3.0128775, 2.6983547] ref [3.7493107, 3.1686532, 3.0886, 3.015898, 2.7000017]
+L=2048: logits max|diff| 0.0095 (max|ref| 12.19), argmax pf 2074 ref 2074, first tok 2074
+greedy continuation agreement 16/16
+  pf  [2074, 198, 248044, 2, 248044, 2, 198, 2, 198, 2, 198, 2, 198, 2, 198, 2]
+  ref [2074, 198, 248044, 2, 248044, 2, 198, 2, 198, 2, 198, 2, 198, 2, 198, 2]
+prefill 2048 tokens: 4114.0 ms -> pp2048 497.82 tok/s   (token-by-token generate incl. 16 new: 152160.7 ms)
+== pf_q38 L=2048 PF_SWI_ADIR=0
+top5 ref logits pf [3.7437592, 3.168367, 3.089751, 3.0128775, 2.6983547] ref [3.7493107, 3.1686532, 3.0886, 3.015898, 2.7000017]
+L=2048: logits max|diff| 0.0095 (max|ref| 12.19), argmax pf 2074 ref 2074, first tok 2074
+greedy continuation agreement 16/16
+  pf  [2074, 198, 248044, 2, 248044, 2, 198, 2, 198, 2, 198, 2, 198, 2, 198, 2]
+  ref [2074, 198, 248044, 2, 248044, 2, 198, 2, 198, 2, 198, 2, 198, 2, 198, 2]
+prefill 2048 tokens: 4812.3 ms -> pp2048 425.58 tok/s   (token-by-token generate incl. 16 new: 152089.1 ms)
+== qi prof PF_SWI_ADIR=1
+qkv         30.41 ms  18.3%    13.6 TFLOPS
+flash       36.56 ms  22.0%     7.6 TFLOPS
+o           10.51 ms   6.3%    13.1 TFLOPS
+swiglu      68.29 ms  41.2%    12.1 TFLOPS
+down        15.79 ms   9.5%    26.1 TFLOPS
+full step gpu 4.79 s
+== qi prof PF_SWI_ADIR=0
+qkv         30.21 ms  21.0%    13.6 TFLOPS
+flash       36.58 ms  25.5%     7.6 TFLOPS
+o           10.04 ms   7.0%    13.7 TFLOPS
+swiglu      46.87 ms  32.6%    17.6 TFLOPS
+down        15.70 ms  10.9%    26.3 TFLOPS
+full step gpu 4.79 s
+== qi 512 parity
+step 39 sigma 0.0200: v max|d| 0.1207 rel 1.43e-2 | free-run latent rel 1.88e-1
+denoise: 40 steps gpu 37.59s total 78.05s
+vs golden [4, 512, 512]: RGB PSNR 22.71 dB
+[Thu Oct 15 01:12:37 2026] amd
+ALLDONE

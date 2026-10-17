@@ -1,0 +1,24 @@
+#version 450
+// Gemma 4 per-layer input prep (E2B/E4B). Workgroup (layer l, column j), E = per-layer width (<= 256 per lane loop):
+//   p = proj[l*E + i] * ps;  out[l*E + i] = (rms(p) * w[i] + raw[l*E + i] * rs) * is
+// (ps = 1/sqrt(n_embd), rs = sqrt(E), is = 1/sqrt(2); raw = per_layer_token_embd row, proj = per_layer_model_proj x)
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer P { float proj[]; };
+layout(std430, binding = 1) readonly buffer R { float raw[]; };
+layout(std430, binding = 2) writeonly buffer O { float o[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint E; uint w_off; float eps; float ps; float rs; float is; uint cs; } pc;
+shared float red[8];
+void main() {
+    uint l = gl_WorkGroupID.x, t = gl_LocalInvocationID.x, b = gl_WorkGroupID.y * pc.cs + l * pc.E;
+    float ss = 0.0;
+    for (uint i = t; i < pc.E; i += 256u) { float v = proj[b + i] * pc.ps; ss += v * v; }
+    ss = subgroupAdd(ss);
+    if (subgroupElect()) red[gl_SubgroupID] = ss;
+    barrier();
+    float tot = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) tot += red[i];
+    float sc = inversesqrt(tot / float(pc.E) + pc.eps);
+    for (uint i = t; i < pc.E; i += 256u) o[b + i] = (proj[b + i] * pc.ps * sc * f32w[pc.w_off + i] + raw[b + i] * pc.rs) * pc.is;
+}

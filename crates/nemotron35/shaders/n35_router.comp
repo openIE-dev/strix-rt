@@ -1,0 +1,44 @@
+#version 450
+// Nemotron 3.5 MoE router (decode): as nemotron nh_router but n_exp <= 512 (16 per lane), top_k <= 32;
+// ids -> aux[256+i], weights -> aux[320+i]. p = sigmoid(W x); select top-k of p + bias (lowest index on ties); w = p / sum * scale.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer F { float f[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) buffer AU { uint au[]; };
+layout(constant_id = 0) const uint PRE = 0u;
+layout(constant_id = 1) const uint AOFF = 0u;   // aux word offset of this column's ids/weights (verify col1 = 128)
+layout(std430, binding = 3) readonly buffer PI { float prin[]; };
+layout(push_constant) uniform PC { uint w_off; uint b_off; uint k; uint n_exp; uint top_k; uint norm; float scale; } pc;
+shared float pr[512];
+void main() {
+    uint sg = gl_SubgroupID, ns = gl_NumSubgroups, ln = gl_SubgroupInvocationID, sz = gl_SubgroupSize;
+    // logits precomputed by n35_rlog (PRE != 0): copy pr[] from binding 3
+    if (PRE != 0u) { for (uint e = gl_LocalInvocationID.x; e < pc.n_exp; e += 256u) pr[e] = prin[e]; }
+    else {
+    for (uint e = sg; e < pc.n_exp; e += ns) {
+            float a = 0.0; uint wb = pc.w_off + e * pc.k;
+            for (uint i = ln; i < pc.k; i += sz) a += f[wb + i] * x[i];
+            a = subgroupAdd(a);
+            if (subgroupElect()) pr[e] = 1.0 / (1.0 + exp(-a));
+        }
+    }
+    barrier();
+    if (sg == 0u) {
+        float sv[16]; bool used[16];
+        for (uint i = 0u; i < 16u; i++) { uint e = ln + 32u * i; sv[i] = e < pc.n_exp ? pr[e] + f[pc.b_off + e] : -3.4e38; if (isnan(sv[i]) || isinf(sv[i])) sv[i] = -3.0e38; used[i] = e >= pc.n_exp; }   // NaN-safe: never emit an invalid id
+        float sum = 0.0; uint mine = 0u;
+        for (uint j = 0u; j < pc.top_k; j++) {
+            float bv = -3.4e38; uint bi = 0xFFFFFFFFu;
+            for (uint i = 0u; i < 16u; i++) if (!used[i] && (sv[i] > bv || bi == 0xFFFFFFFFu)) { bv = sv[i]; bi = ln + 32u * i; }
+            float mx = subgroupMax(bi == 0xFFFFFFFFu ? -3.4e38 : bv);
+            uint win = subgroupMin((bi != 0xFFFFFFFFu && bv == mx) ? bi : 0xFFFFFFFFu);
+            if (win % 32u == ln) used[win / 32u] = true;
+            if (j == ln) mine = win;
+            sum += (win < pc.n_exp && !isnan(pr[win])) ? pr[win] : 0.0;
+        }
+        sum = max(sum, 6.103515625e-5);
+        if (ln < pc.top_k) { bool ok = mine < pc.n_exp; mine = ok ? mine : 0u; float p = ok ? pr[mine] : 0.0; if (isnan(p)) p = 0.0; au[256u + AOFF + ln] = mine; au[320u + AOFF + ln] = floatBitsToUint((pc.norm != 0u ? p / sum : p) * pc.scale); }
+    }
+}

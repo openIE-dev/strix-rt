@@ -1,0 +1,32 @@
+## 1) CPU reference vs fork ggml to_float
+Ternary-Bonsai-2-27B-PQ2_0.gguf blk.0.attn_qkv.weight [10240x5120] ty=142 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=110122 OK
+Ternary-Bonsai-2-27B-PQ2_0.gguf blk.0.ffn_down.weight [5120x17408] ty=142 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=374454 OK
+Ternary-Bonsai-2-27B-PQ2_0.gguf blk.3.attn_q.weight [12288x5120] ty=142 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=110123 OK
+Ternary-Bonsai-2-27B-PQ2_0.gguf blk.63.ffn_up.weight [17408x5120] ty=142 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=110186 OK
+Ternary-Bonsai-2-27B-PQ2_0.gguf blk.62.ssm_out.weight [5120x6144] ty=142 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=132226 OK
+Ternary-Bonsai-2-27B-PQ2_0.gguf output.weight [248320x5120] ty=142 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=110168 OK
+Ternary-Bonsai-2-27B-PQ2_0.gguf token_embd.weight [248320x5120] ty=142 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=110143 OK
+Ternary-Bonsai-2-27B-PTQ1_0.gguf blk.0.attn_qkv.weight [10240x5120] ty=143 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=110122 OK
+Ternary-Bonsai-2-27B-PTQ1_0.gguf blk.0.ffn_down.weight [5120x17408] ty=143 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=374454 OK
+Ternary-Bonsai-2-27B-PTQ1_0.gguf blk.3.attn_q.weight [12288x5120] ty=143 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=110123 OK
+Ternary-Bonsai-2-27B-PTQ1_0.gguf blk.63.ffn_up.weight [17408x5120] ty=143 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=110186 OK
+Ternary-Bonsai-2-27B-PTQ1_0.gguf blk.62.ssm_out.weight [5120x6144] ty=143 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=132226 OK
+Ternary-Bonsai-2-27B-PTQ1_0.gguf output.weight [248320x5120] ty=143 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=110168 OK
+Ternary-Bonsai-2-27B-PTQ1_0.gguf token_embd.weight [248320x5120] ty=143 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=110143 OK
+model-tq2_1.gguf blk.0.ffn_up.weight [6144x2048] ty=43 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=55328 OK
+model-tq2_1.gguf blk.0.ffn_down.weight [2048x6144] ty=43 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=164407 OK
+model-tq2_1.gguf blk.0.attn_k.weight [1024x2048] ty=43 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=57516 OK
+model-tq2_1.gguf blk.27.attn_output.weight [2048x2048] ty=43 : 32 rows, bit-mismatches=0 max|d|=0e0 nonzero=59303 OK
+## 2) PQ2_0 vs PTQ1_0 (same checkpoint)
+blk.0.attn_qkv.weight: 0/61440 values differ OK (identical)
+blk.40.ffn_gate.weight: 0/61440 values differ OK (identical)
+output.weight: 0/61440 values differ OK (identical)
+## 3) Kitten flat 5-trit safetensors vs TQ2_1 GGUF
+model.layers.0.mlp.up_proj.weight [6144x2048] vs blk.0.ffn_up.weight: code mismatches 0/8192, max rel scale diff 0.000e0 (bf16 vs f16 scales) OK
+model.layers.0.mlp.down_proj.weight [2048x6144] vs blk.0.ffn_down.weight: code mismatches 0/24576, max rel scale diff 0.000e0 (bf16 vs f16 scales) OK
+model.layers.13.self_attn.k_proj.weight [1024x2048] vs blk.13.attn_k.weight: code mismatches 0/8192, max rel scale diff 0.000e0 (bf16 vs f16 scales) OK
+## 4) parakeet-redux thrush-ternary-v2
+264 modules: bytes>=243: 0/120913920; max |zero_fraction - ternary.json| = 0.00e0 OK
+## 5) FWHT butterfly vs explicit matrix (n=1024)
+max abs diff 1.1920929e-7 OK
+ALL OK

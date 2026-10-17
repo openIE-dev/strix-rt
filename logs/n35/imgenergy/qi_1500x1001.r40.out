@@ -1,0 +1,19 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+preprocess img/qi_1500x1001.png -> 1504x992 (1457 tokens) CPU 33.93 ms
+preprocess CPU median 16.52 ms over 40 runs
+encoded 1457 tokens x 4096: median 1888.7 ms (GPU wall, 40 runs)
+duration 76.800 s, 1537 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package      6347.731      82.65       40.48     3238.708  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores         340.810       4.44       25.25    -1598.500  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu      357.585       4.66        9.52     -373.493  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone       21.213       0.28        1.84     -120.150  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx              2949.278      38.40       15.97     1722.461  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other        3053.238      39.76       28.01      901.885  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket           6360.101      82.81       53.51     2250.852  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon        6324.719      82.35       53.05     2250.183  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

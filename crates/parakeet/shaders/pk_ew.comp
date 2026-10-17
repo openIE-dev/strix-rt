@@ -1,0 +1,23 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// Elementwise over n = rows * D (index i -> row t = i / D, col c = i % D):
+//  mode 0: A[t*lda + c] = f16(silu(Y[t*ldy + c]))          (FFN hidden)
+//  mode 1: X[t*D + c] += s * Y[t*ldy + ycol + c]            (scaled residual)
+//  mode 2: X[t*D + c] += P[b_off + c]                       (bias)
+//  mode 3: A[t*lda + c] = f16(Y[t*ldy + c])                 (f32 -> f16 GEMM operand)
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Y { float y[]; };
+layout(std430, binding = 2) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 3) readonly buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint mode; uint n; uint D; uint ldy; uint ycol; float s; uint b_off; uint lda; } pc;
+void main() {
+    uint i = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 256u + gl_LocalInvocationID.x;
+    if (i >= pc.n) return;
+    uint t = i / pc.D, c = i - t * pc.D;
+    if (pc.mode == 0u) { float g = y[t * pc.ldy + c]; a[t * pc.lda + c] = float16_t(g / (1.0 + exp(-g))); }
+    else if (pc.mode == 1u) x[t * pc.D + c] += pc.s * y[t * pc.ldy + pc.ycol + c];
+    else if (pc.mode == 2u) x[t * pc.D + c] += pr[pc.b_off + c];
+    else a[t * pc.lda + c] = float16_t(y[t * pc.ldy + c]);
+}

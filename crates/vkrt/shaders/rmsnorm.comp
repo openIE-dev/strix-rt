@@ -1,0 +1,21 @@
+#version 450
+// y = x / rms(x) * w ; single workgroup of 256
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer Y { float y[]; };
+layout(std430, binding = 2) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint n; uint w_off; float eps; } pc;
+shared float red[32];
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    float s = 0.0;
+    for (uint i = t; i < pc.n; i += 256u) s += x[i] * x[i];
+    s = subgroupAdd(s);
+    if (gl_SubgroupInvocationID == 0u) red[gl_SubgroupID] = s;
+    barrier();
+    float tot = 0.0;
+    for (uint i = 0u; i < gl_NumSubgroups; i++) tot += red[i];
+    float sc = inversesqrt(tot / float(pc.n) + pc.eps);
+    for (uint i = t; i < pc.n; i += 256u) y[i] = x[i] * sc * f32w[pc.w_off + i];
+}

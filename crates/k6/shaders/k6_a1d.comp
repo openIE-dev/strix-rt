@@ -1,0 +1,54 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// 1D audio ops (channel-last f32 activations [L][C]).
+//  0 im2col1d: COL[p*kpad + j*C + ci] = f16(pre(X[src*C + ci])), src = p + j*dil - pad (in the x2 nearest-upsampled domain if up2);
+//    zero outside / in K padding. pre: bit0 mp_silu (silu/0.596), bit1 scale by P[off1 + src] (row normalize), bit2 up2.
+//  1 store: O[i] = (bit0 ? ca*O[i] : 0) + cb*(Y[i] + P[off1 + c]); bit1 clamp +-256.   ca, cb = push[5], push[6] float bits
+//  3 row inverse norm: P[off1 + p] = 1 / (1e-4 + |X[p,:]| / sqrt(C))
+//  4 anti-aliased SnakeBeta (2x kaiser up, snake, 2x kaiser down, replicate pads), filters P[0..12] up, P[12..24] down,
+//    P[off1 + c] = exp(alpha), P[off2 + c] = 1/(exp(beta)+1e-9). O[n*C + c] for n < L.
+//  5 col2im for ConvTranspose1d(stride r=dil, padding=pad): O[i*C + co] = P[off1+co] + sum Z[q*(C*k) + co*k + j], i = q*r + j - pad
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Y { float y[]; };
+layout(std430, binding = 2) writeonly buffer COL { float16_t col[]; };
+layout(std430, binding = 3) buffer O { float o[]; };
+layout(std430, binding = 4) buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint mode, n, C, L, kpad, k, dil, pad, flags, off1, off2, f; } pc;
+float snake(float v, uint c) { float s = sin(v * pr[pc.off1 + c]); return v + pr[pc.off2 + c] * s * s; }
+float xin(int q, uint c) { return x[uint(clamp(q, 0, int(pc.L) - 1)) * pc.C + c]; }
+float up(int m, uint c) {   // 2x upsampled sample m (0..2L-1)
+    float s = 0.0;
+    for (int j = 0; j < 12; j++) { int t = m + 15 - j; if ((t & 1) != 0) continue; int q = t / 2; if (q < 0 || q >= int(pc.L) + 10) continue; s += pr[j] * xin(q - 5, c); }
+    return 2.0 * s;
+}
+void main() {
+    uint stride = gl_NumWorkGroups.x * 256u;
+    for (uint i = gl_GlobalInvocationID.x; i < pc.n; i += stride) {
+        if (pc.mode == 0u) {
+            uint p = i / pc.kpad, kk = i % pc.kpad; float v = 0.0;
+            if (kk < pc.k * pc.C) { uint j = kk / pc.C, ci = kk % pc.C; bool u2 = (pc.flags & 4u) != 0u;
+                int lim = int(pc.L) * (u2 ? 2 : 1); int s = int(p) + int(j * pc.dil) - int(pc.pad);
+                if (s >= 0 && s < lim) { uint src = u2 ? uint(s) / 2u : uint(s); v = x[src * pc.C + ci];
+                    if ((pc.flags & 2u) != 0u) v *= pr[pc.off1 + src];
+                    if ((pc.flags & 1u) != 0u) v = v / (1.0 + exp(-v)) / 0.596; } }
+            col[i] = float16_t(v);
+        } else if (pc.mode == 1u) {
+            uint c = i % pc.C; float v = uintBitsToFloat(pc.k) * (y[i] + pr[pc.off1 + c]);
+            if ((pc.flags & 1u) != 0u) v += uintBitsToFloat(pc.kpad) * o[i];
+            if ((pc.flags & 2u) != 0u) v = clamp(v, -256.0, 256.0);
+            o[i] = v;
+        } else if (pc.mode == 3u) {
+            float s = 0.0; for (uint c = 0u; c < pc.C; c++) { float v = x[i * pc.C + c]; s += v * v; }
+            pr[pc.off1 + i] = 1.0 / (1e-4 + sqrt(s / float(pc.C)));
+        } else if (pc.mode == 4u) {
+            uint nn = i / pc.C, c = i % pc.C; float s = 0.0; int L2 = 2 * int(pc.L);
+            for (int kk = 0; kk < 12; kk++) { int m = clamp(2 * int(nn) + kk - 5, 0, L2 - 1); s += pr[12 + kk] * snake(up(m, c), c); }
+            o[i] = s;
+        } else if (pc.mode == 5u) {
+            uint ii = i / pc.C, co = i % pc.C; float s = pr[pc.off1 + co]; int t = int(ii) + int(pc.pad);
+            for (uint j = uint(t) % pc.dil; j < pc.k; j += pc.dil) { int q = (t - int(j)) / int(pc.dil); if (q >= 0 && q < int(pc.L)) s += y[uint(q) * pc.C * pc.k + co * pc.k + j]; }
+            o[i] = s;
+        }
+    }
+}

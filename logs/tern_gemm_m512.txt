@@ -1,0 +1,11 @@
+M=512 iters=20
+| fmt | tensor | N x K | gemm us | TOPS (2MNK) | quantx us | weight GB/s-equiv | max_rel vs int8-x ref | max_rel vs fp32-x ref |
+|---|---|---|---|---|---|---|---|---|
+| PQ2_0 | blk.0.ffn_gate.weight | 17408x5120 | 5024.1 | 18.17 | 71.2 | 4.7 | 1.94e-7 | 3.13e-3 |
+| PQ2_0 | blk.0.ffn_down.weight | 5120x17408 | 4793.9 | 19.04 | 275.7 | 4.9 | 2.42e-7 | 7.95e-3 |
+| PQ2_0 | blk.0.attn_qkv.weight | 10240x5120 | 2817.5 | 19.06 | 71.0 | 4.9 | 1.93e-7 | 4.26e-3 |
+| PQ2_0 | blk.3.attn_output.weight | 5120x6144 | 1660.1 | 19.40 | 91.0 | 5.0 | 2.03e-7 | 4.80e-3 |
+| PTQ1_0 | blk.0.ffn_gate.weight | 17408x5120 | 5492.4 | 16.62 | 72.0 | 3.5 | 1.94e-7 | 3.13e-3 |
+| PTQ1_0 | blk.0.ffn_down.weight | 5120x17408 | 5480.6 | 16.65 | 297.9 | 3.6 | 2.42e-7 | 7.95e-3 |
+| PTQ1_0 | blk.0.attn_qkv.weight | 10240x5120 | 3218.2 | 16.68 | 72.8 | 3.6 | 1.93e-7 | 4.26e-3 |
+| PTQ1_0 | blk.3.attn_output.weight | 5120x6144 | 1855.5 | 17.36 | 75.5 | 3.7 | 2.03e-7 | 4.80e-3 |

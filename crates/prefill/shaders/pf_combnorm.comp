@@ -1,0 +1,31 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+// MoE combine fused with the next layer's input RMSNorm (one workgroup per token):
+// X[t] += sum_s w[t,s] * Yd[inv[t*tk+s]];  A[t] = f16(X[t] * rsqrt(mean(X[t]^2) + eps) * nw).  dim <= 4096.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Y { float yd[]; };
+layout(std430, binding = 2) readonly buffer R { uint r[]; };
+layout(std430, binding = 3) readonly buffer I { uint g[]; };
+layout(std430, binding = 4) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 5) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint dim; uint M; uint tk; uint lda; uint w_off; float eps; } pc;
+shared float red[32];
+void main() {
+    uint t = gl_WorkGroupID.x, i0 = gl_LocalInvocationID.x, n = pc.M * pc.tk;
+    uint rows[8]; float ws[8];
+    for (uint j = 0u; j < pc.tk; j++) { uint q = t * pc.tk + j; rows[j] = g[n + q] * pc.dim; ws[j] = uintBitsToFloat(r[n + q]); }
+    float v[16]; float ss = 0.0;
+    for (uint c = 0u; c < 16u; c++) { uint i = i0 + c * 256u; if (i >= pc.dim) break;
+        float s = x[t * pc.dim + i]; for (uint j = 0u; j < pc.tk; j++) s += ws[j] * yd[rows[j] + i];
+        x[t * pc.dim + i] = s; v[c] = s; ss += s * s; }
+    ss = subgroupAdd(ss);
+    if (subgroupElect()) red[gl_SubgroupID] = ss;
+    barrier();
+    float tot = 0.0; for (uint s = 0u; s < gl_NumSubgroups; s++) tot += red[s];
+    float rs = inversesqrt(tot / float(pc.dim) + pc.eps);
+    for (uint c = 0u; c < 16u; c++) { uint i = i0 + c * 256u; if (i >= pc.dim) break; a[t * pc.lda + i] = float16_t(v[c] * rs * f32w[pc.w_off + i]); }
+}

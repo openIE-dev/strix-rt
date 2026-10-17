@@ -1,0 +1,29 @@
+#version 450
+// NeoX RoPE on q (n_head heads) and k (n_kv heads) at position params[0]; then store k,v into cache.
+// workgroups: n_head + n_kv, 64 threads (head_dim 128).
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Q { float q[]; };
+layout(std430, binding = 1) buffer K { float k[]; };
+layout(std430, binding = 2) readonly buffer V { float v[]; };
+layout(std430, binding = 3) buffer KC { float kc[]; };
+layout(std430, binding = 4) buffer VC { float vc[]; };
+layout(std430, binding = 5) readonly buffer P { uint params[]; };
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; float theta; } pc;
+void main() {
+    uint h = gl_WorkGroupID.x, i = gl_LocalInvocationID.x;
+    uint pos = params[0];
+    float freq = pow(pc.theta, -float(2u * i) / 128.0);
+    float a = float(pos) * freq;
+    float c = cos(a), s = sin(a);
+    if (h < pc.n_head) {
+        uint o = h * 128u;
+        float x0 = q[o + i], x1 = q[o + i + 64u];
+        q[o + i] = x0 * c - x1 * s; q[o + i + 64u] = x0 * s + x1 * c;
+    } else {
+        uint kh = h - pc.n_head, o = kh * 128u;
+        float x0 = k[o + i], x1 = k[o + i + 64u];
+        uint co = pc.cache_off + pos * pc.n_kv * 128u + o;
+        kc[co + i] = x0 * c - x1 * s; kc[co + i + 64u] = x0 * s + x1 * c;
+        vc[co + i] = v[o + i]; vc[co + i + 64u] = v[o + i + 64u];
+    }
+}

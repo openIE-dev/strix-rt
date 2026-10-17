@@ -1,0 +1,13 @@
+#version 450
+// Prefill shared expert combine: X[t][i] += sigmoid(rl[t*ldr + col]) * Y[t][i] (col = n_exp: the shared-gate logit).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Y { float y[]; };
+layout(std430, binding = 2) readonly buffer RL { float rl[]; };
+layout(push_constant) uniform PC { uint dim; uint M; uint ldr; uint col; } pc;
+void main() {
+    uint idx = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 256u + gl_LocalInvocationID.x;
+    if (idx >= pc.dim * pc.M) return;
+    uint t = idx / pc.dim;
+    x[idx] += y[idx] / (1.0 + exp(-rl[t * pc.ldr + pc.col]));
+}

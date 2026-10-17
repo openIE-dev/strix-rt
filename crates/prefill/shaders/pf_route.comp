@@ -1,0 +1,30 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+// MoE routing for M tokens. Logits: workgroup = 16 tokens x 16 experts (one output per thread, k staged 64 at a
+// time), logit Wg[e] . a[t] (a = normed f16 row, Wg f32) -> r[2*M*tk + t*64 + e]. Sigmoid + selection: pf_rsel.
+// (Default path: the router is an f16 coop-matrix GEMM instead; PF_RF32=1 uses this f32-weight kernel.)
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 1) readonly buffer F { float f32w[]; };
+layout(std430, binding = 2) writeonly buffer R { float r[]; };
+layout(push_constant) uniform PC { uint K; uint lda; uint w_off; uint b_off; uint n_exp; uint tk; uint M; } pc;
+const uint KC = 64u;
+shared float As[16][KC + 1u]; shared float Ws[16][KC + 1u];
+void main() {
+    uint eg = (pc.n_exp + 15u) / 16u, t0 = (gl_WorkGroupID.x / eg) * 16u, e0 = (gl_WorkGroupID.x % eg) * 16u, tid = gl_LocalInvocationID.x;
+    uint tr = tid >> 4, ec = tid & 15u;
+    float acc = 0.0;
+    for (uint k0 = 0u; k0 < pc.K; k0 += KC) {
+        barrier();
+        for (uint e = tid; e < 16u * KC; e += 256u) { uint rr = e / KC, kk = e % KC; uint t = min(t0 + rr, pc.M - 1u);
+            As[rr][kk] = float(a[t * pc.lda + k0 + kk]); Ws[rr][kk] = e0 + rr < pc.n_exp ? f32w[pc.w_off + (e0 + rr) * pc.K + k0 + kk] : 0.0; }
+        barrier();
+        [[unroll]] for (uint kk = 0u; kk < KC; kk++) acc += As[tr][kk] * Ws[ec][kk];
+    }
+    if (t0 + tr < pc.M && e0 + ec < pc.n_exp) r[2u * pc.M * pc.tk + (t0 + tr) * 64u + e0 + ec] = acc;
+}

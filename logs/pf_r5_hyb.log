@@ -1,0 +1,22 @@
+[start 19:16:29]
+== check PF_HYB=0
+top5 ref logits pf [5.704762, 5.3765793, 5.346812, 5.4813514, 4.9690185] ref [6.241196, 5.47964, 5.4781084, 5.43662, 5.1879363]
+  pf  [10932, 229, 25, 23, 26, 229, 25, 23, 26, 229, 25, 23, 26, 229, 25, 23]
+exit 0
+== check PF_HYB=1
+top5 ref logits pf [5.704762, 5.346812, 5.3765793, 5.4813514, 4.9690185] ref [6.2151775, 5.502575, 5.4737825, 5.4361496, 5.175062]
+  pf  [10932, 229, 25, 23, 26, 229, 25, 23, 26, 229, 25, 23, 26, 229, 25, 23]
+exit 0
+PF_GBM2=64 PF_SKIP=1 : prefill 512: best 53.4 ms (all [55, 54, 53, 54, 53, 53]) -> pp512 9580.22 tok/s [busy after: no]
+PF_GBM2=64 PF_SKIP=16 : prefill 512: best 204.6 ms (all [207, 205, 204, 204, 205, 205]) -> pp512 2502.32 tok/s [busy after: no]
+PF_GBM2=64 : prefill 512: best 242.0 ms (all [245, 241, 242, 242, 242, 242]) -> pp512 2115.83 tok/s [busy after: no]
+PF_HYB=1 : prefill 512: best 246.6 ms (all [249, 247, 246, 246, 247, 247]) -> pp512 2076.28 tok/s [busy after: no]
+PF_HYB=1 PF_MSWI=1 : prefill 512: best 241.6 ms (all [246, 241, 242, 250, 247, 248]) -> pp512 2119.56 tok/s [busy after: YES]
+PF_HYB=1 PF_LPS=24 : prefill 512: best 243.9 ms (all [247, 244, 244, 244, 244, 243]) -> pp512 2098.81 tok/s [busy after: no]
+PF_GBM2=64 PF_LPS=24 : prefill 512: best 238.5 ms (all [241, 238, 238, 238, 238, 238]) -> pp512 2147.17 tok/s [busy after: no]
+PF_GBM2=64 : prefill 512: best 241.8 ms (all [244, 242, 241, 242, 243, 242]) -> pp512 2117.06 tok/s [busy after: no]
+PF_HYB=1 : prefill 512: best 247.0 ms (all [248, 247, 247, 247, 247, 246]) -> pp512 2073.28 tok/s [busy after: no]
+PF_HYB=1 PF_MSWI=1 : prefill 512: best 242.3 ms (all [246, 242, 242, 242, 242, 243]) -> pp512 2112.75 tok/s [busy after: no]
+PF_HYB=1 PF_LPS=24 : prefill 512: best 243.2 ms (all [246, 244, 243, 243, 243, 244]) -> pp512 2105.56 tok/s [busy after: no]
+PF_GBM2=64 PF_LPS=24 : prefill 512: best 238.3 ms (all [240, 238, 239, 238, 238, 238]) -> pp512 2148.14 tok/s [busy after: no]
+restored auto

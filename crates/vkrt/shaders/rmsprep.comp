@@ -1,0 +1,23 @@
+#version 450
+// After the embedding (and its optional inverse Hadamard): xw = x * norm_w, sq[0] = sum(x^2), zero the other norm
+// slots ("xwide" aux layout: words [1..128) and [256..512)) and the argmax key (words key, key+1). One workgroup.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 1024) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer XW { float xw[]; };
+layout(std430, binding = 2) buffer A { float sq[]; };
+layout(std430, binding = 2) buffer AU { uint au[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint K; uint norm_off; uint key_word; uint off; uint aux_base; } pc;
+shared float red[64];
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    float ss = 0.0;
+    for (uint i = t; i < pc.K; i += 1024u) { float v = x[pc.off + i]; xw[pc.off + i] = v * f32w[pc.norm_off + i]; ss += v * v; }
+    ss = subgroupAdd(ss);
+    if (subgroupElect()) red[gl_SubgroupID] = ss;
+    barrier();
+    if (t == 0u) { float tot = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) tot += red[i]; sq[pc.aux_base] = tot; au[pc.key_word] = 0u; au[pc.key_word + 1u] = 0u; }
+    else if (t < 384u) { uint wd = t < 128u ? t : 128u + t; sq[pc.aux_base + wd] = 0.0; }
+}

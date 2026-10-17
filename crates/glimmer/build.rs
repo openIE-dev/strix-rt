@@ -1,0 +1,18 @@
+// Compiles crates/glimmer/shaders/*.comp with glslc into OUT_DIR.
+fn main() {
+    let out = std::env::var("OUT_DIR").unwrap();
+    println!("cargo:rerun-if-changed=shaders");
+    for e in std::fs::read_dir("shaders").unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().map(|e| e == "comp").unwrap_or(false) {
+            let stem = p.file_stem().unwrap().to_str().unwrap();
+            println!("cargo:rerun-if-changed={}", p.display());
+            let s = std::process::Command::new("glslc").args(["--target-env=vulkan1.3", "-O", "-fshader-stage=compute", "-I", "../vkrt/shaders", "-I", "shaders"])
+                .arg(&p).arg("-o").arg(format!("{out}/{stem}.spv")).status().expect("glslc");
+            if stem == "glm_qgv" { for l in [4u32, 8, 16, 32] {
+                let s2 = std::process::Command::new("glslc").args(["--target-env=vulkan1.3", "-O", "-fshader-stage=compute", "-I", "shaders", &format!("-DLPR={l}u")]).arg(&p).arg("-o").arg(format!("{out}/{stem}_l{l}.spv")).status().expect("glslc");
+                assert!(s2.success(), "glslc failed on glm_qgv l{l}"); } }
+            assert!(s.success(), "glslc failed on {}", p.display());
+        }
+    }
+}

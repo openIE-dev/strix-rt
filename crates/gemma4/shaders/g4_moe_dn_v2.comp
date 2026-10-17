@@ -1,0 +1,65 @@
+#version 450
+// Gemma 4 MoE down + weighted combine: y[col*D + o] = sum_s wt_s * dsc[e_s] * (Wd_e[o] . h[col][s*K ..]).
+// ty 255 = Q5_1 (decoded here: d, m, qh, qs[16]; 24-byte blocks), else any rtcore::qtype via q_any.
+// dsc_off = ~0: no per-expert scale.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+layout(local_size_x = 256) in;
+#ifndef LPR
+#define LPR 8u
+#endif
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 0) readonly buffer W2 { uvec2 w2[]; };
+layout(std430, binding = 0) readonly buffer W4 { uvec4 w4[]; };
+layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
+layout(std430, binding = 1) readonly buffer X { vec4 x4[]; };
+layout(std430, binding = 2) buffer Y { float y[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(std430, binding = 4) readonly buffer AU { uint au[]; };
+layout(std430, binding = 4) readonly buffer AF { float af[]; };
+// Format specialization (255 = push constant ty; Q5_1 is ty 255 itself, so it is never specialized).
+layout(constant_id = 0) const uint TY = 255u;
+layout(push_constant) uniform PC { uint off; uint estride; uint D; uint K; uint top_k; uint ty; uint dsc_off; } pc;
+uint g_xo = 0u;
+vec4 XV(uint i) { return x4[g_xo + i]; }
+#include "q_any.glsl"
+uint sp4(uint n) { return (((n & 0xFu) * 0x00204081u) & 0x01010101u) << 4; }   // 4 qh bits -> bit 4 of each byte
+float q51(uint b, uint xb4) {   // Q5_1 block at byte b (4-aligned) . x[xb4*4 .. +32]; packed-byte unpack (3 ops / 4 weights)
+    vec2 dm = unpackHalf2x16(w[b >> 2]);
+    uint qh = w[(b >> 2) + 1u];
+    vec4 s4 = vec4(0.0), sx4 = vec4(0.0);
+    [[unroll]] for (uint k = 0u; k < 4u; k++) {
+        uint a = w[(b >> 2) + 2u + k];
+        uint lo = (a & 0x0F0F0F0Fu) | sp4(qh >> (4u * k)), hi = ((a >> 4) & 0x0F0F0F0Fu) | sp4(qh >> (16u + 4u * k));
+        vec4 xl = XV(xb4 + k), xh = XV(xb4 + 4u + k);
+        s4 += vec4(float(lo & 0xFFu), float((lo >> 8) & 0xFFu), float((lo >> 16) & 0xFFu), float(lo >> 24)) * xl
+            + vec4(float(hi & 0xFFu), float((hi >> 8) & 0xFFu), float((hi >> 16) & 0xFFu), float(hi >> 24)) * xh;
+        sx4 += xl + xh;
+    }
+    return dm.x * (s4.x + s4.y + s4.z + s4.w) + dm.y * (sx4.x + sx4.y + sx4.z + sx4.w);
+}
+void main() {
+    uint ty = TY == 255u ? pc.ty : TY;
+    if (ty != 255u) q_any_init(ty);
+    uint col = gl_WorkGroupID.y;
+    uint rpw = gl_SubgroupSize / LPR, lane = gl_SubgroupInvocationID % LPR;
+    uint o = (gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID) * rpw + gl_SubgroupInvocationID / LPR;
+    bool valid = o < pc.D;
+    uint ni = pc.K / 32u, rbytes = ty == 255u ? ni * 24u : row_bytes_of(ty, pc.K);
+    float acc = 0.0;
+    for (uint s = 0u; s < pc.top_k; s++) {
+        uint e = au[440u + 16u * col + s];
+        float wt = af[448u + 16u * col + s] * (pc.dsc_off != 0xFFFFFFFFu ? f32w[pc.dsc_off + e] : 1.0);
+        g_xo = (col * pc.top_k + s) * (pc.K >> 2);
+        uint rb = pc.off + e * pc.estride + (valid ? o : 0u) * rbytes;
+        float a = 0.0;
+        if (valid) for (uint it = lane; it < ni; it += LPR) a += ty == 255u ? q51(rb + it * 24u, it * 8u) : dot32(ty, rb, it, it * 8u);
+        acc += wt * a;
+    }
+    acc = subgroupClusteredAdd(acc, LPR);
+    if (valid && lane == 0u) y[col * pc.D + o] = acc;
+}

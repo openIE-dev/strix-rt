@@ -1,0 +1,8 @@
+#version 450
+// After sample: clamp the token just written (toks[pos], pos = aux[160] already advanced) to < vocab, so a NaN/empty
+// argmax (key 0 -> id 0xFFFFFFFF) can never make the next embedding gather read out of bounds.
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) readonly buffer AU { uint au[]; };
+layout(std430, binding = 1) buffer T { uint toks[]; };
+layout(push_constant) uniform PC { uint vocab; } pc;
+void main() { uint p = au[160]; if (toks[p] >= pc.vocab) toks[p] = 0u; }

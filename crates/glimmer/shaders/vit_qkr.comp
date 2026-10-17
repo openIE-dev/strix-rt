@@ -1,0 +1,32 @@
+#version 450
+// Muse Glimmer ViT: q/k/v bias add (pr [n][ldp] = q | k | v) + 2D interleaved RoPE on q and k; outputs f16 [n][16*128] with heads zero-padded 96 -> 128 (flash kernel layout; pad columns never written).
+// Head h of 48 (q 0..15, k 16..31, v 32..47); workgroup y = token. Pair j < 48 of a 96-dim head: j < 24 uses pos_w, else pos_h (1-indexed), freq theta^(-2(j%24)/48).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer P { float pr[]; };
+layout(std430, binding = 1) readonly buffer F { float f32w[]; };
+layout(std430, binding = 2) readonly buffer POS { uint pos[]; };
+layout(std430, binding = 3) writeonly buffer OQ { float16_t oq[]; };
+layout(std430, binding = 4) writeonly buffer OK { float16_t ok[]; };
+layout(std430, binding = 5) writeonly buffer OV { float16_t ov[]; };
+layout(push_constant) uniform PC { uint ldp; uint bq; uint bk; uint bv; float theta; uint hd; } pc;
+void main() {
+    uint h = gl_WorkGroupID.x, tok = gl_WorkGroupID.y, j = gl_LocalInvocationID.x, H = pc.hd / 2u;
+    if (j >= H) return;
+    uint kind = h / 16u, hh = h % 16u;
+    uint o = tok * pc.ldp + kind * 16u * pc.hd + hh * pc.hd + 2u * j;
+    uint bo = (kind == 0u ? pc.bq : (kind == 1u ? pc.bk : pc.bv)) + hh * pc.hd + 2u * j;
+    float x0 = pr[o] + f32w[bo], x1 = pr[o + 1u] + f32w[bo + 1u];
+    if (kind < 2u) {
+        uint q4 = H / 2u, i = j % q4;
+        float p = float(pos[2u * tok + (j < q4 ? 0u : 1u)]);
+        float th = p * pow(pc.theta, -float(2u * i) / float(q4 * 2u));
+        float c = cos(th), s = sin(th);
+        float r0 = x0 * c - x1 * s, r1 = x0 * s + x1 * c; x0 = r0; x1 = r1;
+    }
+    uint po = tok * 2048u + hh * 128u + 2u * j;
+    if (kind == 0u) { oq[po] = float16_t(x0); oq[po + 1u] = float16_t(x1); }
+    else if (kind == 1u) { ok[po] = float16_t(x0); ok[po + 1u] = float16_t(x1); }
+    else { ov[po] = float16_t(x0); ov[po + 1u] = float16_t(x1); }
+}

@@ -1,0 +1,33 @@
+#version 450
+// YuE2 elementwise / im2col helpers. Linear id i over n elements.
+//  0: NAR input       X[t*D+c] = Y[t*D+c] + Aux[t*D+c] + Aux[p0+c]                     (vae2llm(x) + pos_emb[t] + (bias + temb))
+//  1: snake + im2col  A[t*lda + ci*K + k] = f16(snake(X[(t + dil*k - pad)*C + ci]))  (0 outside [0,T)); p6 = alpha off, p7 = 1/beta off (~0: no snake)
+//  2: bias add        X[t*C+c] += P[p0 + c]
+//  3: convT im2col    A[j*lda + ci*2 + tap] = f16(snake(X[(j - u_tap)*C + ci])), u0 = int(p4), u1 = int(p5)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Y { float y[]; };
+layout(std430, binding = 2) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 3) readonly buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint mode; uint n; uint C; uint K; uint p4; uint p5; uint p6; uint p7; uint T; uint lda; uint p10; uint p11; } pc;
+float snk(float v, uint ci) { if (pc.p6 == 0xffffffffu) return v; float s = sin(pr[pc.p6 + ci] * v); return v + pr[pc.p7 + ci] * s * s; }
+void main() {
+    uint i = gl_WorkGroupID.x * 256u + gl_LocalInvocationID.x;
+    if (i >= pc.n) return;
+    if (pc.mode == 0u) { uint t = i / pc.C, c = i - t * pc.C; x[i] = y[i] + pr[i] + pr[pc.p4 + c]; }
+    else if (pc.mode == 1u) {
+        uint ck = pc.C * pc.K, t = i / ck, r = i - t * ck, ci = r / pc.K, k = r - ci * pc.K;
+        int src = int(t) + int(pc.p4 * k) - int(pc.p5);
+        float v = (src >= 0 && src < int(pc.T)) ? snk(x[uint(src) * pc.C + ci], ci) : 0.0;
+        a[t * pc.lda + r] = float16_t(v);
+    }
+    else if (pc.mode == 2u) { uint c = i % pc.C; x[i] += pr[pc.p4 + c]; }
+    else if (pc.mode == 3u) {
+        uint ck = pc.C * 2u, j = i / ck, r = i - j * ck, ci = r >> 1, tap = r & 1u;
+        int src = int(j) - (tap == 0u ? int(pc.p10) : int(pc.p11));
+        float v = (src >= 0 && src < int(pc.T)) ? snk(x[uint(src) * pc.C + ci], ci) : 0.0;
+        a[j * pc.lda + r] = float16_t(v);
+    }
+}

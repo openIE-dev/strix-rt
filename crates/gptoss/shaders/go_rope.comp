@@ -1,0 +1,33 @@
+#version 450
+// gpt-oss: YaRN NeoX RoPE on q (in place) and k (head dim D = 64, pairs (j, j+D/2)), f16 KV store. No q/k norm.
+// q head h at h*D, k head at k_base + kh*D, v at v_base + kh*D. Workgroup per head (n_head q heads, then n_kv k heads).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 64) in;
+const uint D = 64u;
+layout(std430, binding = 0) buffer Q { float qkv[]; };
+layout(std430, binding = 1) buffer KC { float16_t kc[]; };
+layout(std430, binding = 2) buffer VC { float16_t vc[]; };
+layout(std430, binding = 3) readonly buffer AU { uint au[]; };
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; float theta; float freq_scale; float c0; float c1; float mscale; uint k_base; uint v_base; uint pos_word; } pc;
+shared float xs[D];
+void main() {
+    uint h = gl_WorkGroupID.x, i = gl_LocalInvocationID.x, pos = au[pc.pos_word];
+    bool isq = h < pc.n_head; uint kh = h - pc.n_head;
+    uint o = isq ? h * D : pc.k_base + kh * D;
+    xs[i] = qkv[o + i];
+    barrier();
+    uint j = i % (D / 2u);
+    float te = float(pos) * pow(pc.theta, -float(2u * j) / float(D)), ti = pc.freq_scale * te;
+    float y = (float(j) - pc.c0) / max(0.001, pc.c1 - pc.c0);
+    float rm = 1.0 - clamp(y, 0.0, 1.0);
+    float a = ti * (1.0 - rm) + te * rm;
+    float c = cos(a) * pc.mscale, s = sin(a) * pc.mscale;
+    float r = i < D / 2u ? xs[i] * c - xs[i + D / 2u] * s : xs[i - D / 2u] * s + xs[i] * c;
+    if (isq) { qkv[o + i] = r; }
+    else {
+        uint co = pc.cache_off + pos * pc.n_kv * D + kh * D;
+        kc[co + i] = float16_t(r);
+        vc[co + i] = float16_t(qkv[pc.v_base + kh * D + i]);
+    }
+}

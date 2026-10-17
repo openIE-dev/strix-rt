@@ -1,0 +1,24 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+// Row RMSNorm: A[t][i] = f16(X[t][i] * rsqrt(mean(X[t]^2) + eps) * w[i]); one workgroup per row.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 2) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint D; uint lda; uint w_off; float eps; uint x_row0; } pc;
+shared float red[32];
+void main() {
+    uint t = gl_WorkGroupID.x, i0 = gl_LocalInvocationID.x, xb = (pc.x_row0 + t) * pc.D;
+    float ss = 0.0;
+    for (uint i = i0; i < pc.D; i += 256u) { float v = x[xb + i]; ss += v * v; }
+    ss = subgroupAdd(ss);
+    if (subgroupElect()) red[gl_SubgroupID] = ss;
+    barrier();
+    float tot = 0.0; for (uint s = 0u; s < gl_NumSubgroups; s++) tot += red[s];
+    float r = inversesqrt(tot / float(pc.D) + pc.eps);
+    for (uint i = i0; i < pc.D; i += 256u) a[t * pc.lda + i] = float16_t(x[xb + i] * r * f32w[pc.w_off + i]);
+}

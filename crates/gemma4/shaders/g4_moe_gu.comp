@@ -1,0 +1,75 @@
+#version 450
+// Gemma 4 MoE gate|up for the k routed experts (fused gate_up_exps: rows [0, N) gate, [N, 2N) up per expert; any
+// rtcore::qtype via q_any): h[col][s*N + r] = gelu_tanh(G_e[r] . x) * (U_e[r] . x), e = au[440 + 16 col + s].
+// LPR lanes per row cluster, 32-weight items strided over the lanes. Workgroup y = column (x at col * K).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_integer_dot_product : require
+layout(local_size_x = 256) in;
+// Format specialization (255 = push constant ty): folds the q_any switch away.
+layout(constant_id = 0) const uint TY = 255u;
+// 1 (with TY == 0, Q4_K): each workgroup quantizes its x column to int8 blocks of 32 in shared memory (llama.cpp MMVQ-style
+// q8 activations) and the Q4_K nibbles go through dotPacked4x8; the min term uses the exact float block sum.
+layout(constant_id = 1) const uint IDOT = 0u;
+#define QK_MAX 8192u
+shared uint xq[QK_MAX / 4u]; shared float xd[QK_MAX / 32u], xsm[QK_MAX / 32u];
+#ifndef LPR
+#define LPR 16u
+#endif
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 0) readonly buffer W2 { uvec2 w2[]; };
+layout(std430, binding = 0) readonly buffer W4 { uvec4 w4[]; };
+layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
+layout(std430, binding = 1) readonly buffer X { vec4 x4[]; };
+layout(std430, binding = 2) writeonly buffer H { float h[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(std430, binding = 4) readonly buffer AU { uint au[]; };
+layout(push_constant) uniform PC { uint off; uint estride; uint N; uint K; uint top_k; uint ty; } pc;
+uint g_xo = 0u;
+vec4 XV(uint i) { return x4[g_xo + i]; }
+#include "q_any.glsl"
+float idot_q4k(uint rb, uint it) {   // Q4_K sub-block `it` of the row at byte rb . quantized x block `it`
+    uint b = rb + (it >> 3) * 144u, s = it & 7u, sh = (s & 1u) * 4u;
+    uvec4 hd = w4[b >> 4]; vec2 dm = unpackHalf2x16(hd.x); uint sc_, mn_;
+    if (s < 4u) { sc_ = sbyte(hd, 4u + s) & 63u; mn_ = sbyte(hd, 8u + s) & 63u; }
+    else { sc_ = (sbyte(hd, 8u + s) & 0xFu) | ((sbyte(hd, s) >> 6) << 4); mn_ = (sbyte(hd, 8u + s) >> 4) | ((sbyte(hd, 4u + s) >> 6) << 4); }
+    uint qb = (b + 16u + (s >> 1) * 32u) >> 4; uvec4 qa = w4[qb], qc = w4[qb + 1u];
+    uint qq[8] = uint[8](qa.x, qa.y, qa.z, qa.w, qc.x, qc.y, qc.z, qc.w);
+    int acc = 0;
+    [[unroll]] for (uint k = 0u; k < 8u; k++) acc += dotPacked4x8EXT(int((qq[k] >> sh) & 0x0F0F0F0Fu), int(xq[it * 8u + k]));
+    return dm.x * float(sc_) * xd[it] * float(acc) - dm.y * float(mn_) * xsm[it];
+}
+float gelu(float v) { const float c = 0.7978845608028654; return 0.5 * v * (1.0 + tanh(clamp(c * (v + 0.044715 * v * v * v), -15.0, 15.0))); }
+void main() {
+    uint ty = TY == 255u ? pc.ty : TY;
+    q_any_init(ty);
+    uint col = gl_WorkGroupID.y; g_xo = col * (pc.K >> 2);
+    uint rpw = gl_SubgroupSize / LPR, lane = gl_SubgroupInvocationID % LPR;
+    uint row = (gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID) * rpw + gl_SubgroupInvocationID / LPR;
+    bool valid = row < pc.top_k * pc.N;
+    uint s = valid ? row / pc.N : 0u, r = row - s * pc.N, e = au[440u + 16u * col + s];
+    uint rbytes = row_bytes_of(ty, pc.K), ni = pc.K / 32u;
+    uint g0 = pc.off + e * pc.estride + r * rbytes, u0 = g0 + pc.N * rbytes;
+    float ag = 0.0, au_ = 0.0;
+    if (IDOT != 0u && TY == 0u) {
+        for (uint b = gl_LocalInvocationID.x; b < ni; b += gl_WorkGroupSize.x) {
+            vec4 v[8]; float am = 0.0, sm = 0.0;
+            [[unroll]] for (uint k = 0u; k < 8u; k++) { v[k] = XV(b * 8u + k); vec4 a = abs(v[k]); am = max(am, max(max(a.x, a.y), max(a.z, a.w))); sm += dot(v[k], vec4(1.0)); }
+            float d = am / 127.0, id = am > 0.0 ? 127.0 / am : 0.0;
+            [[unroll]] for (uint k = 0u; k < 8u; k++) { ivec4 q = ivec4(round(v[k] * id)) & 255;
+                xq[b * 8u + k] = uint(q.x) | (uint(q.y) << 8) | (uint(q.z) << 16) | (uint(q.w) << 24); }
+            xd[b] = d; xsm[b] = sm;
+        }
+        barrier();
+        if (valid) for (uint it = lane; it < ni; it += LPR) { ag += idot_q4k(g0, it); au_ += idot_q4k(u0, it); }
+    } else if (valid) for (uint it = lane; it < ni; it += LPR) {
+        vec4 xa[8]; [[unroll]] for (uint k = 0u; k < 8u; k++) xa[k] = XV(it * 8u + k);   // x shared by gate and up
+        ag += dot32x(ty, g0, it, it * 8u, xa); au_ += dot32x(ty, u0, it, it * 8u, xa);
+    }
+    ag = subgroupClusteredAdd(ag, LPR); au_ = subgroupClusteredAdd(au_, LPR);
+    if (valid && lane == 0u) h[col * pc.top_k * pc.N + row] = gelu(ag) * au_;
+}

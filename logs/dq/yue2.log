@@ -1,0 +1,16 @@
+[waited 1794s for GPU lock; start 00:52:43]
+loaded in 1.78s (zero copy true)
+== stage 1: AR logits (teacher forced, 90 prefix + 750 codec)
+  ar logits (all rows)         n=5725824   cos 0.999984  rel 5.770e-3  max|d| 0.2979
+  codec argmax agreement 30/31 rows, min row cos 0.999973
+== stage 2: NAR velocity at t=1 (reference noise)
+  v0                           n=48000     cos 0.999939  rel 1.103e-2  max|d| 0.0951
+  prefill gpu 310.2 ms, one velocity gpu 374.2 ms
+== stage 3: 32-step midpoint solve (reference noise)
+  latents                      n=48000     cos 0.999842  rel 1.788e-2  max|d| 0.6976
+  solve wall 25.92s gpu 25.41s
+== stage 4: VAE decode
+  audio (ref latents)          n=2879872   cos 1.000000  rel 6.879e-4  max|d| 0.0040
+  vae wall 0.44s gpu 0.34s  (1439936 samples ref 1439936)
+  audio (our latents)          n=2879872   cos 0.998670  rel 5.158e-2  max|d| 0.3550
+[end 00:53:12; exit 0; ran under GPU lock]

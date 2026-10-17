@@ -1,0 +1,33 @@
+#version 450
+// MoE grouping on the GPU (one workgroup): r[0..nk) = expert of (token, slot) q. Writes g = [src token | inverse pos]
+// (rows grouped by expert) and two tile tables for the grouped GEMM: gt (BM-row tiles) and gt2 (BM2-row tiles).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer R { uint r[]; };
+layout(std430, binding = 1) buffer G { uint g[]; };
+layout(std430, binding = 2) buffer T { uint gt[]; };
+layout(std430, binding = 3) buffer T2 { uint gt2[]; };
+layout(push_constant) uniform PC { uint nk; uint tk; uint n_exp; uint bm; uint bm2; uint t_off2; } pc;
+shared uint cnt[64]; shared uint st[64]; shared uint fill[64];
+void tiles(uint bm) {
+    uint n = 0u;
+    for (uint e = 0u; e < pc.n_exp; e++) for (uint m = 0u; m < cnt[e]; m += bm) {
+        gt[1u + 3u * n] = e; gt[2u + 3u * n] = st[e] + m; gt[3u + 3u * n] = st[e] + min(m + bm, cnt[e]); n++; }
+    gt[0] = n;
+}
+void tiles2(uint bm) {
+    uint n = 0u;
+    for (uint e = 0u; e < pc.n_exp; e++) for (uint m = 0u; m < cnt[e]; m += bm) {
+        gt2[1u + 3u * n] = e; gt2[2u + 3u * n] = st[e] + m; gt2[3u + 3u * n] = st[e] + min(m + bm, cnt[e]); n++; }
+    gt2[0] = n;
+}
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    if (t < 64u) cnt[t] = 0u;
+    barrier();
+    for (uint q = t; q < pc.nk; q += 256u) atomicAdd(cnt[r[q]], 1u);
+    barrier();
+    if (t == 0u) { uint a = 0u; for (uint e = 0u; e < pc.n_exp; e++) { st[e] = a; fill[e] = a; a += cnt[e]; } }
+    barrier();
+    for (uint q = t; q < pc.nk; q += 256u) { uint j = atomicAdd(fill[r[q]], 1u); g[j] = q / pc.tk; g[pc.nk + q] = j; }
+    if (t == 0u) tiles(pc.bm); else if (t == 32u) tiles2(pc.bm2);
+}

@@ -1,0 +1,8 @@
+#version 450
+// Embedding injection (image / separator rows): if au[169] != 0, x = ein (after the token-embedding lookup).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer E { float ein[]; };
+layout(std430, binding = 2) readonly buffer AU { uint au[]; };
+layout(push_constant) uniform PC { uint dim; } pc;
+void main() { uint i = gl_GlobalInvocationID.x; if (i < pc.dim && au[169] != 0u) x[i] = ein[i]; }

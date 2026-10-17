@@ -1,0 +1,29 @@
+#version 450
+// Activation quantization for the int8 GEMM: per token, per 128-wide K group, symmetric int8.
+// xq[m*K + k] = round(x / s), s = amax/127 stored in xs[m*(K/128) + g].
+// One 256-thread workgroup per token m (was one tiny WG per (m, g): 276 us at K=17408). Each wave32 owns whole
+// 128-groups (lane = 4 consecutive values, vec4 load / packed int8x4 store), so the group amax is one subgroupMax
+// and no barrier or shared memory is needed. Requires K % 128 == 0 and wave32 (pipeline created with subgroup 32).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { vec4 x4[]; };
+layout(std430, binding = 1) writeonly buffer XQ { uint xq4[]; };
+layout(std430, binding = 2) writeonly buffer XS { float xs[]; };
+layout(push_constant) uniform PC { uint M; uint K; } pc;
+void main() {
+    const uint m = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (m >= pc.M) return;
+    const uint G = pc.K / 128u, lane = gl_SubgroupInvocationID;
+    for (uint g = gl_SubgroupID; g < G; g += gl_NumSubgroups) {
+        const uint i4 = (m * pc.K + g * 128u) / 4u + lane;
+        const vec4 v = x4[i4];
+        const vec4 av = abs(v);
+        const float a = subgroupMax(max(max(av.x, av.y), max(av.z, av.w)));
+        const float sc = a / 127.0;
+        const vec4 q = sc > 0.0 ? clamp(round(v / sc), -127.0, 127.0) : vec4(0.0);
+        const ivec4 qi = ivec4(q);
+        xq4[i4] = uint(qi.x & 255) | (uint(qi.y & 255) << 8) | (uint(qi.z & 255) << 16) | (uint(qi.w & 255) << 24);
+        if (lane == 0u) xs[m * G + g] = sc;
+    }
+}

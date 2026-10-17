@@ -1,0 +1,23 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+weights: zero-copy dmabuf in 0.487s, 66 arenas/imports (6993 MiB), 498 quant tensors, 2645504 f32 floats
+hadamard: 401 rotated weights, inverse embed true, sign widths [5120, 6144, 17408], gdn perm (128, 16, 3)
+ids: [271, 16, 13, 2972, 6441, 286, 314, 279, 12386, 5260, 318, 22, 20, 18, 17501, 31230, 25, 21047, 557, 17508, 430, 264, 3177, 20105, 539, 279, 26814, 42191, 11437, 18835, 321, 4767, 350, 13, 561, 3177, 20105, 557, 14661, 20632, 539, 43041, 11, 694, 303, 220, 20, 15, 24, 17501, 11, 279, 12386, 5260, 557, 9272, 1238, 279, 1483, 11148, 11, 23211, 438, 205172]
+text: 
+
+1. **Founding of the Roman Republic (753 BC)**: Rome was founded as a city-state by the legendary twins Romulus and Remus. The city-state was initially ruled by kings, but in 509 BC, the Roman Republic was established after the last king, Tarquinius
+prompt 12 steps: GPU 0.434s wall 0.525s | decode 63 tok: wall 2.281s = 27.63 tok/s; GPU 36.181 ms/tok = 27.64 tok/s
+duration 3.450 s, 70 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package       285.012      82.61        9.87      250.958  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores           7.646       2.22        0.33        6.512  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu        8.127       2.36        5.80      -11.877  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        0.260       0.08        0.01        0.223  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx               119.893      34.75       22.11       43.606  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other          91.992      26.66       18.54       28.041  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket            220.013      63.77       46.45       59.771  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon         217.989      63.18       47.02       55.760  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

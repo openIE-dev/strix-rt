@@ -1,0 +1,36 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+// Batched Gated DeltaNet causal conv1d + SiLU + q/k L2 norm (q also * 1/sqrt(128)). Workgroup = (token t, 128-ch head h).
+// Input token tt < 0 comes from the conv state (oldest first). State is NOT updated here (pf_gdn_convst does it after).
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer IN { float pr[]; };
+layout(std430, binding = 1) readonly buffer ST { float st[]; };
+layout(std430, binding = 2) writeonly buffer OUT { float o[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint nk; uint st_off; uint w_off; uint ks; float eps; uint ldp; uint ncv; uint nh; } pc;
+shared float red[4];
+void main() {
+    uint g = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint h = g % pc.nh, t = g / pc.nh, i = gl_LocalInvocationID.x, c = h * 128u + i;
+    uint so = pc.st_off + c * (pc.ks - 1u), wo = pc.w_off + c * pc.ks;
+    float acc = 0.0;
+    for (uint k = 0u; k < pc.ks; k++) {
+        int tt = int(t) - int(pc.ks - 1u) + int(k);
+        float xv = tt >= 0 ? pr[uint(tt) * pc.ldp + c] : st[so + uint(int(pc.ks - 1u) + tt)];
+        acc += f32w[wo + k] * xv;
+    }
+    float v = acc / (1.0 + exp(-acc));
+    if (h < 2u * pc.nk) {
+        float ss = subgroupAdd(v * v);
+        if (subgroupElect()) red[gl_SubgroupID] = ss;
+        barrier();
+        float tot = 0.0; for (uint s = 0u; s < gl_NumSubgroups; s++) tot += red[s];
+        v *= inversesqrt(tot + pc.eps);
+        if (h < pc.nk) v *= inversesqrt(128.0);
+    }
+    o[t * pc.ncv + c] = v;
+}

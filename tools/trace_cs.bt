@@ -1,0 +1,8 @@
+kprobe:amdgpu_cs_ioctl { @cs_start[tid] = nsecs; }
+kretprobe:amdgpu_cs_ioctl /@cs_start[tid]/ { @cs_us = hist((nsecs - @cs_start[tid]) / 1000); @cs_n = count(); @cs_tot_us = sum((nsecs - @cs_start[tid]) / 1000); delete(@cs_start[tid]); }
+kprobe:amdgpu_cs_parser_bos.isra.0 { @pb[tid] = nsecs; }
+kretprobe:amdgpu_cs_parser_bos.isra.0 /@pb[tid]/ { @parser_bos_tot_us = sum((nsecs - @pb[tid]) / 1000); delete(@pb[tid]); }
+kprobe:amdgpu_ttm_tt_get_user_pages { @gup[tid] = nsecs; @gup_n = count(); }
+kretprobe:amdgpu_ttm_tt_get_user_pages /@gup[tid]/ { @get_user_pages_tot_us = sum((nsecs - @gup[tid]) / 1000); delete(@gup[tid]); }
+kprobe:hmm_range_fault { @hr[tid] = nsecs; @hmm_n = count(); }
+kretprobe:hmm_range_fault /@hr[tid]/ { @hmm_range_fault_tot_us = sum((nsecs - @hr[tid]) / 1000); delete(@hr[tid]); }

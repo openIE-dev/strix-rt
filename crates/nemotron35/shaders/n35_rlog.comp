@@ -1,0 +1,18 @@
+#version 450
+// Router logits for many workgroups: one subgroup (wave32) per expert, 8 experts per workgroup:
+// pr[e] = sigmoid(W_gate[e] . x)   (f32 weights, k % 4 == 0). Feeds n35_router (top-k only).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer F { vec4 f4[]; };
+layout(std430, binding = 1) readonly buffer X { vec4 x4[]; };
+layout(std430, binding = 2) writeonly buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint w_off; uint k; uint n_exp; } pc;
+void main() {
+    uint e = gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID, ln = gl_SubgroupInvocationID;
+    if (e >= pc.n_exp) return;
+    uint k4 = pc.k / 4u, wb = pc.w_off / 4u + e * k4; float a = 0.0;
+    for (uint i = ln; i < k4; i += gl_SubgroupSize) a += dot(f4[wb + i], x4[i]);
+    a = subgroupAdd(a);
+    if (subgroupElect()) pr[e] = 1.0 / (1.0 + exp(-a));
+}

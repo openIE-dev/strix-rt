@@ -1,0 +1,56 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+// Sequential Gated DeltaNet scan over M tokens, one workgroup per value head h, thread i owns state row S[h][i][:]
+// in registers. Tokens are staged CH at a time in shared memory. Same recurrence as gdn_step:
+//   S_i *= exp(g); d_i = (v_i - S_i.k) * beta; S_i += d_i k; o_i = S_i.q.  O: f32 [M][nv*128] (pre-norm).
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer CV { float cv[]; };
+layout(std430, binding = 1) readonly buffer PR { float pr[]; };
+layout(std430, binding = 2) buffer S { vec4 s4[]; };
+layout(std430, binding = 3) writeonly buffer O { float o[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint nk; uint nv; uint s_off4; uint a_off; uint b_off; uint dt_off; uint A_off; uint ldp; uint ldc; uint M; } pc;
+const uint CH = 16u;
+shared vec4 ks[CH][32]; shared vec4 qs[CH][32]; shared float vs[CH][128]; shared float dec[CH]; shared float bet[CH];
+void main() {
+    uint h = gl_WorkGroupID.x, i = gl_LocalInvocationID.x, kh = h % pc.nk;
+    vec4 s[32];
+    uint sb = pc.s_off4 + (h * 128u + i) * 32u;
+    [[unroll]] for (uint j = 0u; j < 32u; j++) s[j] = s4[sb + j];
+    float dtb = f32w[pc.dt_off + h], Ah = f32w[pc.A_off + h];
+    for (uint t0 = 0u; t0 < pc.M; t0 += CH) {
+        uint n = min(CH, pc.M - t0);
+        barrier();
+        for (uint tt = 0u; tt < n; tt++) {
+            uint cb = (t0 + tt) * pc.ldc;
+            if (i < 32u) { qs[tt][i] = vec4(cv[cb + kh * 128u + 4u * i], cv[cb + kh * 128u + 4u * i + 1u], cv[cb + kh * 128u + 4u * i + 2u], cv[cb + kh * 128u + 4u * i + 3u]); }
+            else if (i < 64u) { uint q = i - 32u, kb = cb + pc.nk * 128u + kh * 128u + 4u * q; ks[tt][q] = vec4(cv[kb], cv[kb + 1u], cv[kb + 2u], cv[kb + 3u]); }
+            vs[tt][i] = cv[cb + 2u * pc.nk * 128u + h * 128u + i];
+        }
+        if (i < n) {
+            uint pb = (t0 + i) * pc.ldp;
+            float al = pr[pb + pc.a_off + h] + dtb;
+            float sp = al > 20.0 ? al : log(1.0 + exp(al));
+            dec[i] = exp(sp * Ah);
+            bet[i] = 1.0 / (1.0 + exp(-pr[pb + pc.b_off + h]));
+        }
+        barrier();
+        for (uint tt = 0u; tt < n; tt++) {
+            float d = dec[tt];
+            vec4 a0 = vec4(0.0), a1 = vec4(0.0);
+            [[unroll]] for (uint j = 0u; j < 32u; j += 2u) { s[j] *= d; s[j + 1u] *= d; a0 += s[j] * ks[tt][j]; a1 += s[j + 1u] * ks[tt][j + 1u]; }
+            vec4 a = a0 + a1;
+            float dl = (vs[tt][i] - (a.x + a.y + a.z + a.w)) * bet[tt];
+            vec4 b0 = vec4(0.0), b1 = vec4(0.0);
+            [[unroll]] for (uint j = 0u; j < 32u; j += 2u) { s[j] += dl * ks[tt][j]; s[j + 1u] += dl * ks[tt][j + 1u]; b0 += s[j] * qs[tt][j]; b1 += s[j + 1u] * qs[tt][j + 1u]; }
+            vec4 b = b0 + b1;
+            o[(t0 + tt) * pc.nv * 128u + h * 128u + i] = b.x + b.y + b.z + b.w;
+        }
+    }
+    [[unroll]] for (uint j = 0u; j < 32u; j++) s4[sb + j] = s[j];
+}

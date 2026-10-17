@@ -1,0 +1,37 @@
+#version 450
+// gpt-oss MoE gate|up (MXFP4) for the k routed experts, with biases and the clamped "oai" SwiGLU:
+// g = min(Wg x + bg, lim), u = clamp(Wu x + bu, -lim, lim), h[s*N + r] = g * sigmoid(alpha g) * (u + 1).
+// Row = s*N + r; LPR lanes per row (spec constant 0), 32-weight blocks strided over the lanes.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 256) in;
+#ifndef LPR
+#define LPR 16u
+#endif
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 1) readonly buffer X { vec4 x4[]; };
+layout(std430, binding = 2) writeonly buffer H { float h[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(std430, binding = 4) readonly buffer AU { uint au[]; };
+layout(push_constant) uniform PC { uint goff; uint uoff; uint estride; uint N; uint K; uint gb; uint ub; uint top_k; float alpha; float lim; } pc;
+uint g_xo = 0u;
+vec4 XV4(uint i) { return x4[(g_xo + i) >> 2]; }
+#include "mxfp4.glsl"
+void main() {
+    uint col = gl_WorkGroupID.y; g_xo = col * pc.K;
+    uint rpw = gl_SubgroupSize / LPR, lane = gl_SubgroupInvocationID % LPR;
+    uint row = (gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID) * rpw + gl_SubgroupInvocationID / LPR;
+    bool valid = row < pc.top_k * pc.N;
+    uint s = valid ? row / pc.N : 0u, r = row - s * pc.N, e = au[440u + 16u * col + s];
+    uint nb = pc.K / 32u, rb = nb * 17u;
+    uint g0 = pc.goff + e * pc.estride + r * rb, u0 = pc.uoff + e * pc.estride + r * rb;
+    float ag = 0.0, au_ = 0.0;
+    if (valid) for (uint b = lane; b < nb; b += LPR) { ag += mx_dot(g0 + b * 17u, b * 32u); au_ += mx_dot(u0 + b * 17u, b * 32u); }
+    ag = subgroupClusteredAdd(ag, LPR); au_ = subgroupClusteredAdd(au_, LPR);
+    if (valid && lane == 0u) {
+        float g = min(ag + f32w[pc.gb + e * pc.N + r], pc.lim), u = clamp(au_ + f32w[pc.ub + e * pc.N + r], -pc.lim, pc.lim);
+        h[col * pc.top_k * pc.N + row] = g / (1.0 + exp(-pc.alpha * g)) * (u + 1.0);
+    }
+}

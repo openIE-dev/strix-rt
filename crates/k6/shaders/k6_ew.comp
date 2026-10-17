@@ -1,0 +1,30 @@
+#version 450
+// Elementwise over n = rows * D (t = i / D, c = i % D):
+//  0: X[t*D+c] += g * Y[t*ldy+ycol+c], g = M[g_off+c] (1 if g_off == ~0)     (gated residual, no tanh)
+//  1: Y[t*ldy+ycol+c] += M[g_off+c]                                         (bias)
+//  2: A[t*lda+c] = f16(gelu_erf(Y[t*ldy+ycol+c]))
+//  3: A[t*lda+c] = f16(Y[t*ldy+ycol+c])
+//  4: A[t*lda+c] = f16(silu(Y[t*ldy+ycol+c]))
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) buffer Y { float y[]; };
+layout(std430, binding = 2) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 3) readonly buffer M { float md[]; };
+layout(push_constant) uniform PC { uint mode; uint n; uint D; uint ldy; uint ycol; uint lda; uint g_off; uint pad; } pc;
+float erf_(float x) {   // Abramowitz-Stegun 7.1.26 refined (max abs err ~1.2e-7 via erfc form)
+    float z = abs(x), t = 1.0 / (1.0 + 0.5 * z);
+    float r = t * exp(-z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277)))))))));
+    return x >= 0.0 ? 1.0 - r : r - 1.0;
+}
+void main() {
+    uint i = gl_WorkGroupID.x * 256u + gl_LocalInvocationID.x;
+    if (i >= pc.n) return;
+    uint t = i / pc.D, c = i - t * pc.D, yi = t * pc.ldy + pc.ycol + c;
+    if (pc.mode == 0u) { float g = pc.g_off == 0xffffffffu ? 1.0 : md[pc.g_off + c]; x[t * pc.D + c] += g * y[yi]; }
+    else if (pc.mode == 1u) y[yi] += md[pc.g_off + c];
+    else if (pc.mode == 2u) { float v = y[yi]; a[t * pc.lda + c] = float16_t(0.5 * v * (1.0 + erf_(v * 0.7071067811865476))); }
+    else if (pc.mode == 3u) a[t * pc.lda + c] = float16_t(y[yi]);
+    else { float v = y[yi]; a[t * pc.lda + c] = float16_t(v / (1.0 + exp(-v))); }
+}

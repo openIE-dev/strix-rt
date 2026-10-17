@@ -1,0 +1,38 @@
+#version 450
+// GPU greedy sampler for the speech LM (same math as lib.rs penalize + first-max argmax over the speech-only head).
+// Reads logits[0..nv) (vocab rows hb..), history toks[], position aux[160]; writes toks[pos+1] = argmax id and aux[160] = pos+1.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer L { float logits[]; };
+layout(std430, binding = 1) buffer T { uint toks[]; };
+layout(std430, binding = 2) buffer X { uint aux[]; };
+layout(push_constant) uniform P { uint hb, nv, psize_unused, window, grace, base, count, speech_end, stop, sp4299; float run_pen, rep; } p;
+shared float sc[8192]; shared uint wt[256]; shared float bv[256]; shared uint bi[256];
+// correctly rounded s / d (RADV lowers '/' to rcp*mul): Markstein step, then pick the neighbour with the smallest residual
+float cdiv(float s, float d) {
+    precise float q = s * (1.0 / d); precise float r = fma(-q, d, s); q = fma(r, 1.0 / d, q);
+    float best = q; float br = abs(fma(-q, d, s));
+    for (int k = -1; k <= 1; k += 2) { uint u = floatBitsToUint(q); float c = uintBitsToFloat(uint(int(u) + ((q >= 0.0) == (k > 0) ? 1 : -1)));
+        float cr = abs(fma(-c, d, s)); if (cr < br) { br = cr; best = c; } }
+    return best;
+}
+void main() {
+    uint t = gl_LocalInvocationID.x; uint pos = aux[160]; uint psize = aux[161];
+    for (uint i = t; i < p.nv; i += 256u) sc[i] = logits[i];
+    barrier();
+    // window tokens to shared (window <= 256), run penalty by thread 0, then one thread per window slot (unique ids -> no conflicts)
+    uint begin = p.window > 0u ? max(psize, pos + 1u >= p.window ? pos + 1u - p.window : 0u) : 0u; uint nw = pos + 1u - min(begin, pos + 1u);
+    if (t < nw) wt[t] = toks[begin + t];
+    if (t == 0u && p.run_pen != 0.0) { uint last = toks[pos]; uint run = 0u; for (int j = int(pos); j >= 1 && toks[j] == last; j--) run++;
+        if (last >= p.base && last < p.base + p.count && run >= p.grace && last >= p.hb) { precise float pen = float(run - p.grace + 1u) * p.run_pen; sc[last - p.hb] = sc[last - p.hb] - pen; } }
+    barrier();
+    if (p.rep != 1.0 && t < nw) { uint id = wt[t]; bool skip = id == p.speech_end || id == p.stop || id == p.sp4299 || id < p.hb;
+        for (uint j = 0u; j < t && !skip; j++) if (wt[j] == id) skip = true;
+        if (!skip) { float s = sc[id - p.hb]; precise float m = s * p.rep; sc[id - p.hb] = s < 0.0 ? m : cdiv(s, p.rep); } }
+    barrier();
+    float v = -1.0 / 0.0; uint b = 0xffffffffu;
+    for (uint i = t; i < p.nv; i += 256u) if (b == 0xffffffffu || sc[i] > v) { v = sc[i]; b = i; }
+    bv[t] = v; bi[t] = b; barrier();
+    for (uint s = 128u; s > 0u; s >>= 1) { if (t < s) { float v2 = bv[t + s]; uint b2 = bi[t + s];
+        if (b2 != 0xffffffffu && (bi[t] == 0xffffffffu || v2 > bv[t] || (v2 == bv[t] && b2 < bi[t]))) { bv[t] = v2; bi[t] = b2; } } barrier(); }
+    if (t == 0u) { uint tk = bi[0] + p.hb; toks[pos + 1u] = tk; aux[160] = pos + 1u; if (tk == p.speech_end || tk == p.stop) aux[162] = 0u; }  // aux[162]: predicate for the following step body
+}

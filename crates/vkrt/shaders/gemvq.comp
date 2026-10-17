@@ -1,0 +1,731 @@
+#version 450
+// Generic-format fused decode GEMV (any rtcore::qtype per segment): up to 4 row segments, optional fused RMSNorm
+// input scale (sq_in), residual accumulate + next-norm production (sq_out, xw), optional SwiGLU (silu(W x) * (U x)).
+// Items are 32-weight sub-blocks; LPR lanes per row (spec constant 1), workgroup size spec constant 0.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_shader_atomic_float : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_integer_dot_product : require
+layout(local_size_x_id = 0) in;
+// Optional per-pipeline format specialization (255 = read from push constants): folds the format switch away.
+layout(constant_id = 1) const uint TY = 255u;
+layout(constant_id = 2) const uint TYU = 255u;
+// Rows per lane cluster (x loads shared across NRS rows; low-bit formats are x-traffic bound). Segments must be NRS-aligned.
+layout(constant_id = 3) const uint NRS = 1u;
+// Token columns per dispatch (multi-token verify): x column j at x_off4*4 + j*x_cs floats, y/xw column j at j*y_cs,
+// norm slots at word + 1024*j. Weights are read once for all columns.
+layout(constant_id = 4) const uint NB = 1u;
+// 1 = route single-column ternary through the LDS-tiled main_nb path
+layout(constant_id = 5) const uint FNB = 0u;
+// 1 = Q4_K single-column deterministic path processes item PAIRS (low+high nibble of the same 32 qs bytes): half the weight loads/masks, byte->float via cvt_ubyte
+layout(constant_id = 6) const uint Q4P = 0u;
+#ifndef LPR
+#define LPR 8u
+#endif
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 0) readonly buffer W2 { uvec2 w2[]; };
+layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
+layout(std430, binding = 0) readonly buffer W4 { uvec4 w4[]; };
+layout(std430, binding = 1) readonly buffer X { vec4 x[]; };
+layout(std430, binding = 2) buffer Y { float y[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(std430, binding = 4) coherent buffer A { float sq[]; };
+layout(std430, binding = 4) coherent buffer AC { uint cnt[]; };
+layout(std430, binding = 4) readonly buffer AQ4 { uvec4 aq4[]; };
+layout(std430, binding = 5) writeonly buffer XW { float xw[]; };
+layout(std430, binding = 5) readonly buffer XR { float xr[]; };
+layout(std430, binding = 5) readonly buffer XQW { uint xqw[]; };
+layout(std430, binding = 5) readonly buffer XQ4 { uvec4 xq4[]; };   // Q4P bit 2: caller binds per-item sum(x) here (glm_xs)
+layout(push_constant) uniform PC { uint N; uint K; uint flags; uint y_off; uint norm_off; uint sq_in; uint sq_out; uint r1; uint r2; uint r3; uint types;
+    uint w0; uint w1; uint w2; uint w3; uint wup; uint b0; uint b1; uint b2; uint b3; float eps; uint x_off4; uint x_cs; uint y_cs; } pc;
+shared float red[64];
+uint g_xo = 0u;
+// Deterministic norm sums (sq_out): each workgroup stores its partial; the last one to finish sums them in workgroup
+// order (float atomics made greedy decoding run-to-run nondeterministic at near-ties). Scratch in aux words PART_BASE+.
+const uint PART_BASE = 40000u, PART_CS = 2048u, CNT_BASE = 39992u;
+shared uint s_last; shared float s_red2[32];
+// called by every thread of the workgroup; t is meaningful on thread 0
+void sq_commit(uint j, float t) {
+    uint lid = gl_LocalInvocationID.x;
+    if ((pc.flags & 64u) == 0u) { if (lid == 0u) atomicAdd(sq[pc.sq_out + 1024u * j], t); return; }   // flag 64: caller provides aux scratch
+    uint nwg = gl_NumWorkGroups.x * gl_NumWorkGroups.y, wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    if (lid == 0u) { sq[PART_BASE + j * PART_CS + wg] = t; memoryBarrierBuffer(); s_last = atomicAdd(cnt[CNT_BASE + j], 1u) == nwg - 1u ? 1u : 0u; }
+    barrier();
+    if (s_last == 1u) {
+        memoryBarrierBuffer();
+        float a = 0.0; for (uint i = lid; i < nwg; i += gl_WorkGroupSize.x) a += sq[PART_BASE + j * PART_CS + i];
+        a = subgroupAdd(a);
+        if (subgroupElect()) s_red2[gl_SubgroupID] = a;
+        barrier();
+        if (lid == 0u) { float tot = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) tot += s_red2[i]; sq[pc.sq_out + 1024u * j] += tot; cnt[CNT_BASE + j] = 0u; }
+    }
+    barrier();
+}
+vec4 XV(uint i) { return x[pc.x_off4 + g_xo + i]; }
+#include "q_any.glsl"
+void main_nr() {
+    uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint rps = gl_SubgroupSize / LPR, lane = gl_SubgroupInvocationID % LPR;
+    uint row0 = ((wg * gl_NumSubgroups + gl_SubgroupID) * rps + gl_SubgroupInvocationID / LPR) * NRS;
+    bool any_valid = row0 < pc.N;
+    uint seg = row0 < pc.r1 ? 0u : row0 < pc.r2 ? 1u : row0 < pc.r3 ? 2u : 3u;
+    uint segb = seg == 0u ? 0u : seg == 1u ? pc.r1 : seg == 2u ? pc.r2 : pc.r3;
+    uint segn = seg == 0u ? pc.r1 : seg == 1u ? pc.r2 : seg == 2u ? pc.r3 : pc.N;
+    uint lrow0 = row0 - segb;
+    uint woff = seg == 0u ? pc.w0 : seg == 1u ? pc.w1 : seg == 2u ? pc.w2 : pc.w3;
+    uint boff = seg == 0u ? pc.b0 : seg == 1u ? pc.b1 : seg == 2u ? pc.b2 : pc.b3;
+    uint ty = TY != 255u ? TY : (pc.types >> (4u * seg)) & 0xFu, tyu = TYU != 255u ? TYU : (pc.types >> 16u) & 0xFu;
+    uint ie = item_elems(ty), nit = pc.K / ie, xs4 = ie / 4u, rbs = row_bytes_of(ty, pc.K), rbsu = row_bytes_of(tyu, pc.K);
+    uint lmax = min(segn, pc.N) - segb - 1u;
+    float acc[4] = float[4](0.0, 0.0, 0.0, 0.0), acc2[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    if (any_valid) {
+        for (uint it = lane; it < nit; it += LPR) {
+            vec4 xa[8]; [[unroll]] for (uint k = 0u; k < 8u; k++) xa[k] = XV(it * xs4 + k);
+            [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+                uint lr = min(lrow0 + r, lmax);
+                acc[r] += dot32x(ty, woff + lr * rbs, it, it * xs4, xa);
+#ifdef SWIGLU
+                acc2[r] += dot32x(tyu, pc.wup + lr * rbsu, it, it * xs4, xa);
+#endif
+            }
+        }
+    }
+    float scale = ((pc.flags & 4u) != 0u) ? inversesqrt(sq[pc.sq_in] / float(pc.K) + pc.eps) : 1.0;
+    float t2 = 0.0;
+    [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+        float a = subgroupClusteredAdd(acc[r], LPR) * scale;
+#ifdef SWIGLU
+        float a2 = subgroupClusteredAdd(acc2[r], LPR) * scale;
+        a = a / (1.0 + exp(-a)) * a2;
+#endif
+        uint row = row0 + r;
+        if (row < pc.N && lane == 0u) {
+            if (boff != 0xFFFFFFFFu) a += f32w[boff + lrow0 + r];
+            uint o = pc.y_off + row;
+            float nv = ((pc.flags & 1u) != 0u) ? y[o] + a : a;
+            y[o] = nv;
+            if ((pc.flags & 16u) != 0u) xw[o] = nv * f32w[pc.norm_off + row];
+            t2 += nv * nv;
+        }
+    }
+    if ((pc.flags & 8u) != 0u) {
+        t2 = subgroupAdd(t2);
+        if (subgroupElect()) red[gl_SubgroupID] = t2;
+        barrier();
+        float t = 0.0; if (gl_LocalInvocationID.x == 0u) { for (uint i = 0u; i < gl_NumSubgroups; i++) t += red[i]; }
+        sq_commit(0u, t);
+    }
+}
+
+vec4 XVJ(uint j, uint i) { return x[pc.x_off4 + j * (pc.x_cs / 4u) + i]; }
+// Prism ternary item (128 weights) for NRS rows x NB columns: each x vec4 is loaded once and reused by all rows
+// (ternary decode is cheap; x vector loads are the bottleneck). acc[r] component j = row r, column j.
+void tern_item(uint ty, uint lr0, uint lmax, uint woff, uint rbs, uint it, uint xb4, inout vec4 acc[4]) {
+    vec4 s[4] = vec4[4](vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0)); float d[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    if (ty == 8u) {
+        uint wv[4][9]; bool odd[4];
+        [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+            uint bo = woff + min(lr0 + r, lmax) * rbs + it * 34u, bw = bo >> 2; odd[r] = (bo & 2u) != 0u;
+            [[unroll]] for (uint k = 0u; k < 9u; k++) wv[r][k] = w[bw + k];
+            d[r] = unpackHalf2x16(odd[r] ? (wv[r][0] >> 16) : wv[r][0]).x;
+        }
+        [[unroll]] for (uint k = 0u; k < 8u; k++) {
+            vec4 xv[4][4];
+            [[unroll]] for (uint q = 0u; q < 4u; q++) [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) xv[q][j] = XVJ(j, xb4 + 4u * k + q);
+            [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+                uint v = odd[r] ? wv[r][k + 1u] : ((wv[r][k] >> 16) | (wv[r][k + 1u] << 16));
+                [[unroll]] for (uint q = 0u; q < 4u; q++) {
+                    vec4 t = vec4((uvec4(v) >> uvec4(8u * q, 8u * q + 2u, 8u * q + 4u, 8u * q + 6u)) & 3u) - 1.0;
+                    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) s[r][j] += dot(t, xv[q][j]);
+                }
+            }
+        }
+    } else {
+        uint wb[4]; uvec4 q[4][4];
+        [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+            wb[r] = (woff + min(lr0 + r, lmax) * rbs + it * 28u) >> 2;
+            [[unroll]] for (uint g = 0u; g < 4u; g++) q[r][g] = (uvec4(w[wb[r] + g]) >> uvec4(0, 8, 16, 24)) & 255u;
+        }
+        [[unroll]] for (uint n = 0u; n < 5u; n++) {
+            vec4 xv[4][4];
+            [[unroll]] for (uint g = 0u; g < 4u; g++) [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) xv[g][j] = XVJ(j, xb4 + n * 4u + g);
+            [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) [[unroll]] for (uint g = 0u; g < 4u; g++) {
+                q[r][g] *= 3u; vec4 t = vec4(q[r][g] >> 8) - 1.0; q[r][g] &= 255u;
+                [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) s[r][j] += dot(t, xv[g][j]);
+            }
+        }
+        [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) [[unroll]] for (uint g = 0u; g < 2u; g++) q[r][g] = (uvec4(w[wb[r] + 4u + g]) >> uvec4(0, 8, 16, 24)) & 255u;
+        [[unroll]] for (uint n = 0u; n < 5u; n++) {
+            vec4 xv[2][4];
+            [[unroll]] for (uint g = 0u; g < 2u; g++) [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) xv[g][j] = XVJ(j, xb4 + 20u + n * 2u + g);
+            [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) [[unroll]] for (uint g = 0u; g < 2u; g++) {
+                q[r][g] *= 3u; vec4 t = vec4(q[r][g] >> 8) - 1.0; q[r][g] &= 255u;
+                [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) s[r][j] += dot(t, xv[g][j]);
+            }
+        }
+        vec4 xa[4], xc[4];
+        [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) { xa[j] = XVJ(j, xb4 + 30u); xc[j] = XVJ(j, xb4 + 31u); }
+        [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+            uint w6 = w[wb[r] + 6u]; uvec2 qh = uvec2(w6, w6 >> 8) & 255u; d[r] = unpackHalf2x16(w6 >> 16).x;
+            [[unroll]] for (uint n = 0u; n < 4u; n++) {
+                qh *= 3u; vec2 t = vec2(qh >> 8) - 1.0; qh &= 255u;
+                [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) s[r][j] += dot(t, n == 0u ? xa[j].xy : n == 1u ? xa[j].zw : n == 2u ? xc[j].xy : xc[j].zw);
+            }
+        }
+    }
+    [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) acc[r] += d[r] * s[r];
+}
+// flag 32: ternary x int8 path (xq8.comp layout): trits as u8 0..2, integer dot4 with int8 x, minus the block sum of x.
+const uint XQ_BASE = 16384u, XQ_CS = 4352u, XS_BASE = 34816u, XS_CS = 272u;
+int dp4(uint a, uint b) { return dotPacked4x8EXT(int(a), int(b)); }
+void tern_item_q(uint ty, uint lr0, uint lmax, uint woff, uint rbs, uint it, inout vec4 acc[4]) {
+    ivec4 s[4] = ivec4[4](ivec4(0), ivec4(0), ivec4(0), ivec4(0)); float d[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    uint xq4 = (XQ_BASE >> 2) + it * 8u, xcs4 = XQ_CS >> 2;
+    if (ty == 8u) {
+        uint wv[4][9]; bool odd[4];
+        [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+            uint bo = woff + min(lr0 + r, lmax) * rbs + it * 34u, bw = bo >> 2; odd[r] = (bo & 2u) != 0u;
+            [[unroll]] for (uint k = 0u; k < 9u; k++) wv[r][k] = w[bw + k];
+            d[r] = unpackHalf2x16(odd[r] ? (wv[r][0] >> 16) : wv[r][0]).x;
+        }
+        [[unroll]] for (uint k = 0u; k < 8u; k++) {
+            uvec4 xv[4];
+            [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) xv[j] = aq4[xq4 + j * xcs4 + k];
+            [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+                uint v = odd[r] ? wv[r][k + 1u] : ((wv[r][k] >> 16) | (wv[r][k + 1u] << 16));
+                [[unroll]] for (uint q = 0u; q < 4u; q++) {
+                    uint b = (v >> (8u * q)) & 255u, t = (b | (b << 6) | (b << 12) | (b << 18)) & 0x03030303u;
+                    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) s[r][j] += dp4(t, xv[j][q]);
+                }
+            }
+        }
+    } else {
+        if (ty == 12u) {   // TQ2_1: dword k of the half-block, shift 2l -> elements 32l + 4k .. +3 = xq dword 8l + k
+            uint qb[4];
+            [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) { uint b = woff + min(lr0 + r, lmax) * rbs + (it >> 1) * 68u; qb[r] = (b + (it & 1u) * 32u) >> 2;
+                uint dw = w[(b + 64u) >> 2]; d[r] = unpackHalf2x16((it & 1u) == 0u ? dw : (dw >> 16)).x; }
+            [[unroll]] for (uint l = 0u; l < 4u; l++) {
+                uvec4 xv[2][4];
+                [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) { xv[0][j] = aq4[xq4 + j * xcs4 + 2u * l]; xv[1][j] = aq4[xq4 + j * xcs4 + 2u * l + 1u]; }
+                [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) [[unroll]] for (uint k = 0u; k < 8u; k++) {
+                    uint t = (w[qb[r] + k] >> (2u * l)) & 0x03030303u;
+                    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) s[r][j] += dp4(t, xv[k >> 2][j][k & 3u]);
+                }
+            }
+        } else {
+        uint wb[4]; uint A[4][4], B[4][4];
+        [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+            wb[r] = (woff + min(lr0 + r, lmax) * rbs + it * 28u) >> 2;
+            [[unroll]] for (uint g = 0u; g < 4u; g++) { uint u = w[wb[r] + g]; A[r][g] = u & 0x00FF00FFu; B[r][g] = (u >> 8) & 0x00FF00FFu; }
+        }
+        [[unroll]] for (uint n = 0u; n < 5u; n++) {
+            uvec4 xv[4];
+            [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) xv[j] = aq4[xq4 + j * xcs4 + n];
+            [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) [[unroll]] for (uint g = 0u; g < 4u; g++) {
+                uint a = A[r][g] * 3u, bb = B[r][g] * 3u;
+                uint t = ((a >> 8) & 0x00030003u) | (((bb >> 8) & 0x00030003u) << 8);
+                A[r][g] = a & 0x00FF00FFu; B[r][g] = bb & 0x00FF00FFu;
+                [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) s[r][j] += dp4(t, xv[j][g]);
+            }
+        }
+        [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) [[unroll]] for (uint g = 0u; g < 2u; g++) { uint u = w[wb[r] + 4u + g]; A[r][g] = u & 0x00FF00FFu; B[r][g] = (u >> 8) & 0x00FF00FFu; }
+        [[unroll]] for (uint n = 0u; n < 5u; n++) {
+            uvec2 xv[4];
+            [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) { uvec4 u = aq4[xq4 + j * xcs4 + 5u + (n >> 1)]; xv[j] = (n & 1u) == 0u ? u.xy : u.zw; }
+            [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) [[unroll]] for (uint g = 0u; g < 2u; g++) {
+                uint a = A[r][g] * 3u, bb = B[r][g] * 3u;
+                uint t = ((a >> 8) & 0x00030003u) | (((bb >> 8) & 0x00030003u) << 8);
+                A[r][g] = a & 0x00FF00FFu; B[r][g] = bb & 0x00FF00FFu;
+                [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) s[r][j] += dp4(t, xv[j][g]);
+            }
+        }
+        uvec2 xh[4];
+        [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) xh[j] = aq4[xq4 + j * xcs4 + 7u].zw;
+        [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+            uint w6 = w[wb[r] + 6u]; uint a = (w6 & 0xFFu) | ((w6 & 0xFF00u) << 8); d[r] = unpackHalf2x16(w6 >> 16).x;
+            [[unroll]] for (uint n = 0u; n < 4u; n++) {
+                a *= 3u; uint t = (a >> 8) & 0x00030003u; a &= 0x00FF00FFu; t = (t & 3u) | ((t >> 8) & 0x300u);   // two u8 trits
+                [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) { uint xd = (n >> 1) == 0u ? xh[j].x : xh[j].y; s[r][j] += dp4(t, (xd >> (16u * (n & 1u))) & 0xFFFFu); }
+            }
+        }
+    }
+        }
+    vec4 sc = vec4(0.0), sm = vec4(0.0);
+    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) { sc[j] = sq[XS_BASE + j * XS_CS + 2u * it]; sm[j] = sq[XS_BASE + j * XS_CS + 2u * it + 1u]; }
+    [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) acc[r] += d[r] * sc * (vec4(s[r]) - sm);
+}
+// x of the current item for all NB columns, loaded once per item and shared by the NRS rows
+vec4 g_xc[4][8];
+// Q4_K sub-block against NB columns: scales/nibbles decoded once, same per-column arithmetic as dot32x (bitwise equal).
+vec4 q4k_cols(uint rb, uint it) {
+    uint b = rb + (it >> 3) * 144u, sb = it & 7u, jj = sb >> 1, sh = (sb & 1u) * 4u;
+    uvec4 hd = w4[b >> 4];
+    vec2 dm = unpackHalf2x16(hd.x);
+    uint sc_, mn_;
+    if (sb < 4u) { sc_ = sbyte(hd, 4u + sb) & 63u; mn_ = sbyte(hd, 8u + sb) & 63u; }
+    else { sc_ = (sbyte(hd, 8u + sb) & 0xFu) | ((sbyte(hd, sb) >> 6) << 4); mn_ = (sbyte(hd, 8u + sb) >> 4) | ((sbyte(hd, 4u + sb) >> 6) << 4); }
+    uint qb = (b + 16u + jj * 32u) >> 4;
+    uvec4 qa = w4[qb], qc = w4[qb + 1u];
+    uint qq[8] = uint[8](qa.x, qa.y, qa.z, qa.w, qc.x, qc.y, qc.z, qc.w);
+    vec4 n4[8];
+    [[unroll]] for (uint k = 0u; k < 8u; k++) { uint q = qq[k]; n4[k] = vec4((uvec4(q, q >> 8, q >> 16, q >> 24) >> sh) & 0xFu); }
+    vec4 r = vec4(0.0);
+    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) {
+        float sq = 0.0, sx = 0.0;
+        [[unroll]] for (uint k = 0u; k < 8u; k++) { vec4 xa = g_xc[j][k]; sq += dot(n4[k], xa); sx += dot(xa, vec4(1.0)); }
+        r[j] = dm.x * float(sc_) * sq - dm.y * float(mn_) * sx;
+    }
+    return r;
+}
+// Q6_K sub-block against NB columns (same per-column arithmetic as dot32x ty 1).
+vec4 q6k_cols(uint rb, uint it) {
+    uint b = rb + (it >> 3) * 210u, sb = it & 7u, n = sb >> 2, q = sb & 3u;
+    float d = f16at(b + 208u);
+    uint qlb = b + n * 64u + (q & 1u) * 32u, qhb = b + 128u + n * 32u, nsh = (q >> 1) * 4u, hsh = q * 2u;
+    vec4 v[8];
+    [[unroll]] for (uint k = 0u; k < 8u; k++) {
+        uint a = rd32(qlb + 4u * k), h = rd32(qhb + 4u * k);
+        v[k] = vec4(ivec4((((uvec4(a, a >> 8, a >> 16, a >> 24) >> nsh) & 0xFu) | (((uvec4(h, h >> 8, h >> 16, h >> 24) >> hsh) & 3u) << 4))) - 32);
+    }
+    float c0 = float(int(rdb(b + 192u + n * 8u + 2u * q) << 24) >> 24), c1 = float(int(rdb(b + 193u + n * 8u + 2u * q) << 24) >> 24);
+    vec4 r = vec4(0.0);
+    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) {
+        float s0 = 0.0, s1 = 0.0;
+        [[unroll]] for (uint k = 0u; k < 8u; k++) { vec4 xa = g_xc[j][k]; if (k < 4u) s0 += dot(v[k], xa); else s1 += dot(v[k], xa); }
+        r[j] = d * (c0 * s0 + c1 * s1);
+    }
+    return r;
+}
+// Q5_K sub-block against NB columns (same per-column arithmetic as dot32x ty 2).
+vec4 q5k_cols(uint rb, uint it) {
+    uint b = rb + (it >> 3) * 176u, sb = it & 7u, jj = sb >> 1, sh = (sb & 1u) * 4u;
+    uvec4 hd = w4[b >> 4];
+    vec2 dm = unpackHalf2x16(hd.x);
+    uint sc_, mn_;
+    if (sb < 4u) { sc_ = sbyte(hd, 4u + sb) & 63u; mn_ = sbyte(hd, 8u + sb) & 63u; }
+    else { sc_ = (sbyte(hd, 8u + sb) & 0xFu) | ((sbyte(hd, sb) >> 6) << 4); mn_ = (sbyte(hd, 8u + sb) >> 4) | ((sbyte(hd, 4u + sb) >> 6) << 4); }
+    uint qb = (b + 48u + jj * 32u) >> 4;
+    uvec4 qa = w4[qb], qc = w4[qb + 1u], ha = w4[(b + 16u) >> 4], hc = w4[(b + 32u) >> 4];
+    uint qq[8] = uint[8](qa.x, qa.y, qa.z, qa.w, qc.x, qc.y, qc.z, qc.w), hh[8] = uint[8](ha.x, ha.y, ha.z, ha.w, hc.x, hc.y, hc.z, hc.w);
+    vec4 n4[8];
+    [[unroll]] for (uint k = 0u; k < 8u; k++) { uint q = qq[k], h = hh[k]; n4[k] = vec4(((uvec4(q, q >> 8, q >> 16, q >> 24) >> sh) & 0xFu) | (((uvec4(h, h >> 8, h >> 16, h >> 24) >> sb) & 1u) << 4)); }
+    vec4 r = vec4(0.0);
+    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) {
+        float sq = 0.0, sx = 0.0;
+        [[unroll]] for (uint k = 0u; k < 8u; k++) { vec4 xa = g_xc[j][k]; sq += dot(n4[k], xa); sx += dot(xa, vec4(1.0)); }
+        r[j] = dm.x * float(sc_) * sq - dm.y * float(mn_) * sx;
+    }
+    return r;
+}
+// Q8_0 block against NB columns (same arithmetic as dot32x ty 3).
+vec4 q80_cols(uint rb, uint it) {
+    uint b = rb + it * 34u; float d = f16at(b);
+    vec4 v[8];
+    [[unroll]] for (uint k = 0u; k < 8u; k++) { uint a = rd32(b + 2u + 4u * k); v[k] = vec4(ivec4(int(a << 24) >> 24, int(a << 16) >> 24, int(a << 8) >> 24, int(a) >> 24)); }
+    vec4 r = vec4(0.0);
+    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) { float acc = 0.0; [[unroll]] for (uint k = 0u; k < 8u; k++) acc += dot(v[k], g_xc[j][k]); r[j] = acc * d; }
+    return r;
+}
+// IQ4_NL / IQ4_XS sub-block against NB columns (same arithmetic as dot32x ty 4/5).
+vec4 iq4_cols(uint ty, uint rb, uint it) {
+    float dl; uint qa4[4];
+    if (ty == 4u) { uint b = rb + it * 18u; dl = f16at(b); [[unroll]] for (uint k = 0u; k < 4u; k++) qa4[k] = rd32(b + 2u + 4u * k); }
+    else { uint b = rb + (it >> 3) * 136u, ib = it & 7u;
+        uvec2 hd = w2[b >> 3];
+        uint ls = ((hd.y >> (8u * (ib >> 1) + 4u * (ib & 1u))) & 0xFu) | ((((hd.x >> 16) >> (2u * ib)) & 3u) << 4);
+        dl = unpackHalf2x16(hd.x).x * (float(ls) - 32.0);
+        uint qb = (b + 8u + 16u * ib) >> 3; uvec2 a0 = w2[qb], a1 = w2[qb + 1u]; qa4 = uint[4](a0.x, a0.y, a1.x, a1.y); }
+    vec4 lo[4], hi[4];
+    [[unroll]] for (uint k = 0u; k < 4u; k++) { uint a = qa4[k];
+        lo[k] = vec4(KV_IQ4NL[a & 15u], KV_IQ4NL[(a >> 8) & 15u], KV_IQ4NL[(a >> 16) & 15u], KV_IQ4NL[(a >> 24) & 15u]);
+        hi[k] = vec4(KV_IQ4NL[(a >> 4) & 15u], KV_IQ4NL[(a >> 12) & 15u], KV_IQ4NL[(a >> 20) & 15u], KV_IQ4NL[(a >> 28) & 15u]); }
+    vec4 r = vec4(0.0);
+    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) { float s = 0.0; [[unroll]] for (uint k = 0u; k < 4u; k++) s += dot(lo[k], g_xc[j][k]) + dot(hi[k], g_xc[j][k + 4u]); r[j] = dl * s; }
+    return r;
+}
+// Q3_K sub-block against NB columns (same arithmetic as dot32x ty 6).
+vec4 q3k_cols(uint rb, uint it) {
+    uint b = rb + (it >> 3) * 110u, s = it & 7u, n = s >> 2, j0 = s & 3u;
+    float d = f16at(b + 108u);
+    float sc[2]; vec4 v[8];
+    [[unroll]] for (uint hf = 0u; hf < 2u; hf++) {
+        uint k = 8u * n + 2u * j0 + hf;
+        uint lo = rdb(b + 96u + (k & 7u)); lo = k < 8u ? (lo & 0xFu) : (lo >> 4);
+        uint hi = (rdb(b + 96u + 8u + (k & 3u)) >> (2u * (k >> 2))) & 3u;
+        sc[hf] = float(int(lo | (hi << 4)) - 32);
+        [[unroll]] for (uint kk = 0u; kk < 4u; kk++) {
+            uint q = rd32(b + 32u + n * 32u + hf * 16u + 4u * kk), hm = rd32(b + hf * 16u + 4u * kk);
+            uvec4 qv = (uvec4(q, q >> 8, q >> 16, q >> 24) >> (2u * j0)) & 3u;
+            uvec4 hv = (uvec4(hm, hm >> 8, hm >> 16, hm >> 24) >> (4u * n + j0)) & 1u;
+            v[hf * 4u + kk] = vec4(ivec4(qv) - 4 * (1 - ivec4(hv)));
+        }
+    }
+    vec4 r = vec4(0.0);
+    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) {
+        float part[2];
+        [[unroll]] for (uint hf = 0u; hf < 2u; hf++) { float sm = 0.0; [[unroll]] for (uint kk = 0u; kk < 4u; kk++) sm += dot(v[hf * 4u + kk], g_xc[j][hf * 4u + kk]); part[hf] = sc[hf] * sm; }
+        r[j] = d * (part[0] + part[1]);
+    }
+    return r;
+}
+// IQ3_S sub-block against NB columns (same arithmetic as dot32x ty 7).
+vec4 iq3s_cols(uint rb, uint it) {
+    uint b = rb + (it >> 3) * 110u, ib = it & 7u;
+    float db = f16at(b) * float(1u + 2u * ((rdb(b + 106u + ib / 2u) >> (4u * (ib & 1u))) & 0xFu));
+    uint qh = rdb(b + 66u + ib);
+    vec4 v[8];
+    [[unroll]] for (uint l = 0u; l < 4u; l++) {
+        uint g1 = IQ3S_GRID[rdb(b + 2u + 8u * ib + 2u * l) | ((qh << (8u - 2u * l)) & 256u)];
+        uint g2 = IQ3S_GRID[rdb(b + 3u + 8u * ib + 2u * l) | ((qh << (7u - 2u * l)) & 256u)];
+        uint sg = rdb(b + 74u + 4u * ib + l);
+        vec4 m1 = vec4(uvec4(g1, g1 >> 8, g1 >> 16, g1 >> 24) & 0xFFu), m2 = vec4(uvec4(g2, g2 >> 8, g2 >> 16, g2 >> 24) & 0xFFu);
+        vec4 s1 = vec4(1.0) - 2.0 * vec4((uvec4(sg) >> uvec4(0u, 1u, 2u, 3u)) & 1u), s2 = vec4(1.0) - 2.0 * vec4((uvec4(sg) >> uvec4(4u, 5u, 6u, 7u)) & 1u);
+        v[2u * l] = m1 * s1; v[2u * l + 1u] = m2 * s2;
+    }
+    vec4 r = vec4(0.0);
+    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) { float acc = 0.0; [[unroll]] for (uint l = 0u; l < 4u; l++) acc += dot(v[2u * l], g_xc[j][2u * l]) + dot(v[2u * l + 1u], g_xc[j][2u * l + 1u]); r[j] = acc * db; }
+    return r;
+}
+vec4 qk_cols(uint ty, uint rb, uint it) { return ty == 0u ? q4k_cols(rb, it) : ty == 1u ? q6k_cols(rb, it) : ty == 2u ? q5k_cols(rb, it) : ty == 3u ? q80_cols(rb, it) : ty <= 5u ? iq4_cols(ty, rb, it) : ty == 6u ? q3k_cols(rb, it) : iq3s_cols(rb, it); }
+void main_nb() {   // NB token columns x NRS rows per lane cluster
+    uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint rps = gl_SubgroupSize / LPR, lane = gl_SubgroupInvocationID % LPR;
+    uint row0 = ((wg * gl_NumSubgroups + gl_SubgroupID) * rps + gl_SubgroupInvocationID / LPR) * NRS;
+    bool any_valid = row0 < pc.N;
+    uint seg = row0 < pc.r1 ? 0u : row0 < pc.r2 ? 1u : row0 < pc.r3 ? 2u : 3u;
+    uint segb = seg == 0u ? 0u : seg == 1u ? pc.r1 : seg == 2u ? pc.r2 : pc.r3;
+    uint segn = seg == 0u ? pc.r1 : seg == 1u ? pc.r2 : seg == 2u ? pc.r3 : pc.N;
+    uint lrow0 = row0 - segb;
+    uint woff = seg == 0u ? pc.w0 : seg == 1u ? pc.w1 : seg == 2u ? pc.w2 : pc.w3;
+    uint boff = seg == 0u ? pc.b0 : seg == 1u ? pc.b1 : seg == 2u ? pc.b2 : pc.b3;
+    uint ty = TY != 255u ? TY : (pc.types >> (4u * seg)) & 0xFu, tyu = TYU != 255u ? TYU : (pc.types >> 16u) & 0xFu;
+    uint ie = item_elems(ty), nit = pc.K / ie, xs4 = ie / 4u, rbs = row_bytes_of(ty, pc.K), rbsu = row_bytes_of(tyu, pc.K);
+    uint lmax = min(segn, pc.N) - segb - 1u;
+vec4 acc[4] = vec4[4](vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0)), acc2[4] = vec4[4](vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0));
+    // NB 5..8 (k-quant fast path only): columns 4..7 in accB/acc2B; the same weight item is re-decoded right after the
+    // first half, so it comes from cache and the weights stream from memory once for all NB columns (bitwise per column)
+    vec4 accB[4] = vec4[4](vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0)), acc2B[4] = vec4[4](vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0));
+    if ((ty == 8u || ty == 9u || ty == 12u) && any_valid) {
+        for (uint it = lane; it < nit; it += LPR) {
+            if ((pc.flags & 32u) != 0u) {
+                tern_item_q(ty, lrow0, lmax, woff, rbs, it, acc);
+#ifdef SWIGLU
+                tern_item_q(tyu, lrow0, lmax, pc.wup, rbsu, it, acc2);
+#endif
+            } else {
+            tern_item(ty, lrow0, lmax, woff, rbs, it, it * xs4, acc);
+#ifdef SWIGLU
+            tern_item(tyu, lrow0, lmax, pc.wup, rbsu, it, it * xs4, acc2);
+#endif
+            }
+        }
+    } else if (any_valid) {
+        if (false) {
+        } else {
+            #ifdef SWIGLU
+            if (ty <= 7u && tyu <= 7u) {
+#else
+            if (ty <= 7u) {
+#endif
+                for (uint it = lane; it < nit; it += LPR) {
+                    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) [[unroll]] for (uint k = 0u; k < 8u; k++) g_xc[j][k] = XVJ(j, it * 8u + k);
+                    [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+                        uint lr = min(lrow0 + r, lmax);
+                        vec4 a = qk_cols(ty, woff + lr * rbs, it);
+                        [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) acc[r][j] += a[j];
+#ifdef SWIGLU
+                        vec4 bq = qk_cols(tyu, pc.wup + lr * rbsu, it);
+                        [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) acc2[r][j] += bq[j];
+#endif
+                    }
+                    if (NB > 4u) {
+                        [[unroll]] for (uint j = 0u; j < 4u; j++) [[unroll]] for (uint k = 0u; k < 8u; k++) g_xc[j][k] = XVJ(min(4u + j, NB - 1u), it * 8u + k);
+                        [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+                            uint lr = min(lrow0 + r, lmax);
+                            accB[r] += qk_cols(ty, woff + lr * rbs, it);
+#ifdef SWIGLU
+                            acc2B[r] += qk_cols(tyu, pc.wup + lr * rbsu, it);
+#endif
+                        }
+                    }
+                }
+            } else
+            // sequential item order; the single-column main() uses the same order when flag 64 (deterministic) is set
+            for (uint it = lane; it < nit; it += LPR) {
+                [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+                    uint lr = min(lrow0 + r, lmax);
+                    [[unroll]] for (uint j = 0u; j < 4u; j++) if (j < NB) {
+                        g_xo = j * (pc.x_cs / 4u);
+                        acc[r][j] += dot32(ty, woff + lr * rbs, it, it * xs4);
+#ifdef SWIGLU
+                        acc2[r][j] += dot32(tyu, pc.wup + lr * rbsu, it, it * xs4);
+#endif
+                    }
+                }
+            }
+        }
+    }
+    float t2[8] = float[8](0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    [[unroll]] for (uint j = 0u; j < 8u; j++) if (j < NB) {
+        float scale = ((pc.flags & 4u) != 0u) ? inversesqrt(sq[pc.sq_in + 1024u * j] / float(pc.K) + pc.eps) : 1.0;
+        [[unroll]] for (uint r = 0u; r < 4u; r++) if (r < NRS) {
+            float a = subgroupClusteredAdd(j < 4u ? acc[r][j & 3u] : accB[r][j & 3u], LPR) * scale;
+#ifdef SWIGLU
+            float a2 = subgroupClusteredAdd(j < 4u ? acc2[r][j & 3u] : acc2B[r][j & 3u], LPR) * scale;
+            a = a / (1.0 + exp(-a)) * a2;
+#endif
+            uint row = row0 + r;
+            if (row < pc.N && lane == 0u) {
+                if (boff != 0xFFFFFFFFu) a += f32w[boff + lrow0 + r];
+                uint o = pc.y_off + j * pc.y_cs + row;
+                float nv = ((pc.flags & 1u) != 0u) ? y[o] + a : a;
+                y[o] = nv;
+                if ((pc.flags & 16u) != 0u) xw[o] = nv * f32w[pc.norm_off + row];
+                t2[j] += nv * nv;
+            }
+        }
+    }
+    if ((pc.flags & 8u) != 0u) {
+        [[unroll]] for (uint j = 0u; j < 8u; j++) if (j < NB) { float t = subgroupAdd(t2[j]); if (subgroupElect()) red[j * 8u + gl_SubgroupID] = t; }
+        barrier();
+        [[unroll]] for (uint j = 0u; j < 8u; j++) if (j < NB) { float t = 0.0; if (gl_LocalInvocationID.x == 0u) { for (uint i = 0u; i < gl_NumSubgroups; i++) t += red[j * 8u + i]; } sq_commit(j, t); }
+    }
+}
+
+// Q4_K item pair p (items 2p, 2p+1 share the same 32 qs bytes: low nibbles = even item, high = odd). Per-item arithmetic matches dot32x.
+float q4k_pair_x(uint rb, uint p, in vec4 xa0[8], in vec4 xa1[8]) {
+    uint it = 2u * p, b = rb + (it >> 3) * 144u, s = it & 7u, jj = s >> 1;
+    uvec4 hd = w4[b >> 4];
+    vec2 dm = unpackHalf2x16(hd.x);
+    uint sc0, mn0, sc1, mn1;
+    if (s < 4u) { sc0 = sbyte(hd, 4u + s) & 63u; mn0 = sbyte(hd, 8u + s) & 63u; sc1 = sbyte(hd, 5u + s) & 63u; mn1 = sbyte(hd, 9u + s) & 63u; }
+    else { sc0 = (sbyte(hd, 8u + s) & 0xFu) | ((sbyte(hd, s) >> 6) << 4); mn0 = (sbyte(hd, 8u + s) >> 4) | ((sbyte(hd, 4u + s) >> 6) << 4);
+           sc1 = (sbyte(hd, 9u + s) & 0xFu) | ((sbyte(hd, s + 1u) >> 6) << 4); mn1 = (sbyte(hd, 9u + s) >> 4) | ((sbyte(hd, 5u + s) >> 6) << 4); }
+    uint qb = (b + 16u + jj * 32u) >> 4;
+    uvec4 qa = w4[qb], qc = w4[qb + 1u];
+    uint qq[8] = uint[8](qa.x, qa.y, qa.z, qa.w, qc.x, qc.y, qc.z, qc.w);
+    float sq0 = 0.0, sx0 = 0.0, sq1 = 0.0, sx1 = 0.0;
+    [[unroll]] for (uint k = 0u; k < 8u; k++) {
+        uint lo = qq[k] & 0x0F0F0F0Fu, hi = (qq[k] >> 4) & 0x0F0F0F0Fu;
+        vec4 x0 = xa0[k], x1 = xa1[k];
+        sq0 += dot(vec4(float(lo & 0xFFu), float((lo >> 8) & 0xFFu), float((lo >> 16) & 0xFFu), float(lo >> 24)), x0); if ((Q4P & 4u) == 0u) sx0 += dot(x0, vec4(1.0));
+        sq1 += dot(vec4(float(hi & 0xFFu), float((hi >> 8) & 0xFFu), float((hi >> 16) & 0xFFu), float(hi >> 24)), x1); if ((Q4P & 4u) == 0u) sx1 += dot(x1, vec4(1.0));
+    }
+    if ((Q4P & 4u) != 0u) { sx0 = xr[it]; sx1 = xr[it + 1u]; }
+    return (dm.x * float(sc0) * sq0 - dm.y * float(mn0) * sx0) + (dm.x * float(sc1) * sq1 - dm.y * float(mn1) * sx1);
+}
+// Q6_K item with aligned 32-bit word loads (+funnel shift when the 210-byte block starts at a 2 mod 4 address): 18 word loads instead of 32 ushort loads. Same arithmetic as dot32x ty 1.
+float q6k_al(uint rb, uint it) {
+    uint b = rb + (it >> 3) * 210u, sb = it & 7u, n = sb >> 2, q = sb & 3u; bool odd = (b & 2u) != 0u; uint bw = b >> 2;
+    float d = f16at(b + 208u);
+    uint qlw = bw + (n * 64u + (q & 1u) * 32u) / 4u, qhw = bw + (128u + n * 32u) / 4u, nsh = (q >> 1) * 4u, hsh = q * 2u;
+    float s0 = 0.0, s1 = 0.0;
+    [[unroll]] for (uint k = 0u; k < 8u; k++) {
+        uint a = odd ? ((w[qlw + k] >> 16) | (w[qlw + k + 1u] << 16)) : w[qlw + k], h = odd ? ((w[qhw + k] >> 16) | (w[qhw + k + 1u] << 16)) : w[qhw + k];
+        uint v = ((a >> nsh) & 0x0F0F0F0Fu) | (((h >> hsh) & 0x03030303u) << 4);
+        vec4 xa = XV(it * 8u + k);
+        float t = dot(vec4(float(v & 0xFFu), float((v >> 8) & 0xFFu), float((v >> 16) & 0xFFu), float(v >> 24)) - 32.0, xa);
+        if (k < 4u) s0 += t; else s1 += t;
+    }
+    float c0 = float(int(rdb(b + 192u + n * 8u + 2u * q) << 24) >> 24), c1 = float(int(rdb(b + 193u + n * 8u + 2u * q) << 24) >> 24);
+    return d * (c0 * s0 + c1 * s1);
+}
+float q4k_pair(uint rb, uint p) {
+    vec4 xa0[8], xa1[8];
+    [[unroll]] for (uint k = 0u; k < 8u; k++) { xa0[k] = XV(2u * p * 8u + k); xa1[k] = XV(2u * p * 8u + 8u + k); }
+    return q4k_pair_x(rb, p, xa0, xa1);
+}
+// Integer-dot Q4_K item pair: x pre-quantised to int8 per 32 by glm_xs2 (words at binding 5), nibbles x int8 via dotPacked4x8 (llama.cpp MMVQ arithmetic), min term uses exact sum(x).
+float q4k_pair_i(uint rb, uint p) {
+    uint it = 2u * p, b = rb + (it >> 3) * 144u, s = it & 7u, jj = s >> 1;
+    uvec4 hd = w4[b >> 4];
+    vec2 dm = unpackHalf2x16(hd.x);
+    uint sc0, mn0, sc1, mn1;
+    if (s < 4u) { sc0 = sbyte(hd, 4u + s) & 63u; mn0 = sbyte(hd, 8u + s) & 63u; sc1 = sbyte(hd, 5u + s) & 63u; mn1 = sbyte(hd, 9u + s) & 63u; }
+    else { sc0 = (sbyte(hd, 8u + s) & 0xFu) | ((sbyte(hd, s) >> 6) << 4); mn0 = (sbyte(hd, 8u + s) >> 4) | ((sbyte(hd, 4u + s) >> 6) << 4);
+           sc1 = (sbyte(hd, 9u + s) & 0xFu) | ((sbyte(hd, s + 1u) >> 6) << 4); mn1 = (sbyte(hd, 9u + s) >> 4) | ((sbyte(hd, 5u + s) >> 6) << 4); }
+    uint qb = (b + 16u + jj * 32u) >> 4;
+    uvec4 qa = w4[qb], qc = w4[qb + 1u];
+    uint qq[8] = uint[8](qa.x, qa.y, qa.z, qa.w, qc.x, qc.y, qc.z, qc.w);
+    uvec4 x0a = xq4[it * 2u], x0c = xq4[it * 2u + 1u], x1a = xq4[it * 2u + 2u], x1c = xq4[it * 2u + 3u];
+    uint xa0[8] = uint[8](x0a.x, x0a.y, x0a.z, x0a.w, x0c.x, x0c.y, x0c.z, x0c.w), xa1[8] = uint[8](x1a.x, x1a.y, x1a.z, x1a.w, x1c.x, x1c.y, x1c.z, x1c.w);
+    // G activation scale groups per 32-item (Q4P bits 4-5: 0 -> 1, 1 -> 2, 2 -> 4); words per group 8/G
+    const uint G = 1u << ((Q4P >> 4) & 3u), WPG = 8u / G;
+    uint XD = pc.K / 4u, XSX = XD + G * (pc.K / 32u);
+    float r0 = 0.0, r1 = 0.0, m0 = 0.0, m1 = 0.0;
+    [[unroll]] for (uint g = 0u; g < G; g++) {
+        int is0 = 0, is1 = 0;
+        [[unroll]] for (uint k = g * WPG; k < (g + 1u) * WPG; k++) {
+            is0 += dotPacked4x8EXT(int(qq[k] & 0x0F0F0F0Fu), int(xa0[k]));
+            is1 += dotPacked4x8EXT(int((qq[k] >> 4) & 0x0F0F0F0Fu), int(xa1[k]));
+        }
+        r0 += uintBitsToFloat(xqw[XD + it * G + g]) * float(is0); r1 += uintBitsToFloat(xqw[XD + (it + 1u) * G + g]) * float(is1);
+        m0 += uintBitsToFloat(xqw[XSX + it * G + g]); m1 += uintBitsToFloat(xqw[XSX + (it + 1u) * G + g]);
+    }
+    return (dm.x * float(sc0) * r0 - dm.y * float(mn0) * m0) + (dm.x * float(sc1) * r1 - dm.y * float(mn1) * m1);
+}
+// Q6_K quad (128 weights = 4 items sharing 64 ql + 32 qh bytes): aligned 32-bit word loads (+funnel shift for 2-mod-4 blocks), byte->float via cvt_ubyte,
+// the -32 offset taken from per-16 sums of x (glm_xs halves at xr[8192 + 2*item + h]): sum((v-32) x) = sum(v x) - 32 sum(x). Q4P bit 6.
+float q6k_quad(uint rb, uint qd) {
+    uint b = rb + (qd >> 1) * 210u, n = qd & 1u; bool odd = (b & 2u) != 0u; uint bw = b >> 2;
+    float d = f16at(b + 208u);
+    uint qlw = bw + n * 16u, qhw = bw + 32u + n * 8u, scw = bw + 48u + n * 2u;
+    uint sw0 = odd ? ((w[scw] >> 16) | (w[scw + 1u] << 16)) : w[scw], sw1 = odd ? ((w[scw + 1u] >> 16) | (w[scw + 2u] << 16)) : w[scw + 1u];
+    float sa[4] = float[4](0.0, 0.0, 0.0, 0.0), sb2[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    [[unroll]] for (uint k = 0u; k < 8u; k++) {
+        uint a0 = odd ? ((w[qlw + k] >> 16) | (w[qlw + k + 1u] << 16)) : w[qlw + k];
+        uint a1 = odd ? ((w[qlw + 8u + k] >> 16) | (w[qlw + 9u + k] << 16)) : w[qlw + 8u + k];
+        uint h = odd ? ((w[qhw + k] >> 16) | (w[qhw + k + 1u] << 16)) : w[qhw + k];
+        uint v[4];
+        v[0] = (a0 & 0x0F0F0F0Fu) | ((h & 0x03030303u) << 4);
+        v[1] = (a1 & 0x0F0F0F0Fu) | (((h >> 2) & 0x03030303u) << 4);
+        v[2] = ((a0 >> 4) & 0x0F0F0F0Fu) | (((h >> 4) & 0x03030303u) << 4);
+        v[3] = ((a1 >> 4) & 0x0F0F0F0Fu) | (((h >> 6) & 0x03030303u) << 4);
+        [[unroll]] for (uint q = 0u; q < 4u; q++) {
+            vec4 xa = XV((qd * 4u + q) * 8u + k);
+            float t = dot(vec4(float(v[q] & 0xFFu), float((v[q] >> 8) & 0xFFu), float((v[q] >> 16) & 0xFFu), float(v[q] >> 24)), xa);
+            if (k < 4u) sa[q] += t; else sb2[q] += t;
+        }
+    }
+    float r = 0.0;
+    [[unroll]] for (uint q = 0u; q < 4u; q++) {
+        uint wsrc = q < 2u ? sw0 : sw1, sh = (q & 1u) * 16u;
+        float c0 = float(int((wsrc >> sh) << 24) >> 24), c1 = float(int((wsrc >> (sh + 8u)) << 24) >> 24);
+        uint it = qd * 4u + q;
+        r += c0 * (sa[q] - 32.0 * xr[8192u + 2u * it]) + c1 * (sb2[q] - 32.0 * xr[8192u + 2u * it + 1u]);
+    }
+    return d * r;
+}
+void main_q4p() {
+    uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint rps = gl_SubgroupSize / LPR, lane = gl_SubgroupInvocationID % LPR;
+    uint row = (wg * gl_NumSubgroups + gl_SubgroupID) * rps + gl_SubgroupInvocationID / LPR;
+    bool valid = row < pc.N;
+    uint seg = row < pc.r1 ? 0u : row < pc.r2 ? 1u : row < pc.r3 ? 2u : 3u;
+    uint lrow = row - (seg == 0u ? 0u : seg == 1u ? pc.r1 : seg == 2u ? pc.r2 : pc.r3);
+    uint woff = seg == 0u ? pc.w0 : seg == 1u ? pc.w1 : seg == 2u ? pc.w2 : pc.w3;
+    uint boff = seg == 0u ? pc.b0 : seg == 1u ? pc.b1 : seg == 2u ? pc.b2 : pc.b3;
+    float acc = 0.0, nv = 0.0;
+    if (valid) {
+        if (TY == 0u) { uint rb = woff + lrow * row_bytes_of(0u, pc.K), np = pc.K / 64u;
+            if ((Q4P & 8u) != 0u) { for (uint p = lane; p < np; p += LPR) acc += q4k_pair_i(rb, p); }
+            else { for (uint p = lane; p < np; p += LPR) acc += q4k_pair(rb, p); } }
+        else { uint rb = woff + lrow * row_bytes_of(1u, pc.K);
+            if ((Q4P & 64u) != 0u) { uint nq = pc.K / 128u; for (uint qd = lane; qd < nq; qd += LPR) acc += q6k_quad(rb, qd); }
+            else { uint ni = pc.K / 32u; for (uint it = lane; it < ni; it += LPR) acc += q6k_al(rb, it); } }
+    }
+    acc = subgroupClusteredAdd(acc, LPR);
+    float scale = ((pc.flags & 4u) != 0u) ? inversesqrt(sq[pc.sq_in] / float(pc.K) + pc.eps) : 1.0;
+    acc *= scale;
+    if (valid && lane == 0u) {
+        if (boff != 0xFFFFFFFFu) acc += f32w[boff + lrow];
+        uint o = pc.y_off + row;
+        nv = ((pc.flags & 1u) != 0u) ? y[o] + acc : acc;
+        y[o] = nv;
+        if ((pc.flags & 16u) != 0u) xw[o] = nv * f32w[pc.norm_off + row];
+    }
+    if ((pc.flags & 8u) != 0u) {
+        float t2 = subgroupAdd((valid && lane == 0u) ? nv * nv : 0.0);
+        if (subgroupElect()) red[gl_SubgroupID] = t2;
+        barrier();
+        float t = 0.0; if (gl_LocalInvocationID.x == 0u) { for (uint i = 0u; i < gl_NumSubgroups; i++) t += red[i]; }
+        sq_commit(0u, t);
+    }
+}
+#ifdef SWIGLU
+// Fused ffn gate+up (Q4_K both): one dispatch, x loaded once per pair for both rows, silu(gate)*up in the epilogue (no f32 intermediate round trip).
+void main_q4p_sw() {
+    uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint rps = gl_SubgroupSize / LPR, lane = gl_SubgroupInvocationID % LPR;
+    uint row = (wg * gl_NumSubgroups + gl_SubgroupID) * rps + gl_SubgroupInvocationID / LPR;
+    bool valid = row < pc.N;
+    float acc = 0.0, acc2 = 0.0;
+    if (valid) {
+        uint rb = pc.w0 + row * row_bytes_of(0u, pc.K), rbu = pc.wup + row * row_bytes_of(0u, pc.K), np = pc.K / 64u;
+        for (uint p = lane; p < np; p += LPR) {
+            vec4 xa0[8], xa1[8];
+            [[unroll]] for (uint k = 0u; k < 8u; k++) { xa0[k] = XV(2u * p * 8u + k); xa1[k] = XV(2u * p * 8u + 8u + k); }
+            acc += q4k_pair_x(rb, p, xa0, xa1); acc2 += q4k_pair_x(rbu, p, xa0, xa1);
+        }
+    }
+    acc = subgroupClusteredAdd(acc, LPR); acc2 = subgroupClusteredAdd(acc2, LPR);
+    if (valid && lane == 0u) y[pc.y_off + row] = acc / (1.0 + exp(-acc)) * acc2;
+}
+#endif
+void main() {
+    q_any_init(pc.types);
+#ifdef SWIGLU
+    if (Q4P != 0u && TY == 0u && TYU == 0u && NB == 1u && FNB == 0u && NRS == 1u && (pc.flags & 64u) != 0u) { if ((Q4P & 1u) == 1u) { main_q4p_sw(); return; } }
+#endif
+#ifndef SWIGLU
+    if (Q4P != 0u && TY <= 1u && NB == 1u && FNB == 0u && NRS == 1u && (pc.flags & 64u) != 0u) { if (((Q4P >> TY) & 1u) == 1u) { main_q4p(); return; } }
+#endif
+    if (NB > 1u || FNB != 0u || ((pc.flags & 32u) != 0u && (TY == 8u || TY == 9u || TY == 12u))) { main_nb(); return; }
+    if (NRS > 1u) { main_nr(); return; }
+    uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint rps = gl_SubgroupSize / LPR, lane = gl_SubgroupInvocationID % LPR;
+    uint row = (wg * gl_NumSubgroups + gl_SubgroupID) * rps + gl_SubgroupInvocationID / LPR;
+    bool valid = row < pc.N;
+    uint seg = row < pc.r1 ? 0u : row < pc.r2 ? 1u : row < pc.r3 ? 2u : 3u;
+    uint lrow = row - (seg == 0u ? 0u : seg == 1u ? pc.r1 : seg == 2u ? pc.r2 : pc.r3);
+    uint woff = seg == 0u ? pc.w0 : seg == 1u ? pc.w1 : seg == 2u ? pc.w2 : pc.w3;
+    uint boff = seg == 0u ? pc.b0 : seg == 1u ? pc.b1 : seg == 2u ? pc.b2 : pc.b3;
+    uint ty = TY != 255u ? TY : (pc.types >> (4u * seg)) & 0xFu, tyu = TYU != 255u ? TYU : (pc.types >> 16u) & 0xFu;
+    uint ie = item_elems(ty), nit = pc.K / ie, xs4 = ie / 4u;
+    float acc = 0.0, acc2 = 0.0, nv = 0.0;
+    if (valid) {
+        uint rb = woff + lrow * row_bytes_of(ty, pc.K);
+#ifdef SWIGLU
+        uint rbu = pc.wup + lrow * row_bytes_of(tyu, pc.K);
+#endif
+        // two items per iteration: more independent loads in flight per lane
+        uint it = lane;
+        if ((pc.flags & 64u) != 0u) {   // deterministic mode: same sequential order as main_nb
+            for (; it < nit; it += LPR) {
+                acc += dot32(ty, rb, it, it * xs4);
+#ifdef SWIGLU
+                acc2 += dot32(tyu, rbu, it, it * xs4);
+#endif
+            }
+        }
+        for (; it + LPR < nit; it += 2u * LPR) {
+            float a0 = dot32(ty, rb, it, it * xs4), a1 = dot32(ty, rb, it + LPR, (it + LPR) * xs4);
+#ifdef SWIGLU
+            float b0 = dot32(tyu, rbu, it, it * xs4), b1 = dot32(tyu, rbu, it + LPR, (it + LPR) * xs4);
+            acc2 += b0 + b1;
+#endif
+            acc += a0 + a1;
+        }
+        if (it < nit) {
+            acc += dot32(ty, rb, it, it * xs4);
+#ifdef SWIGLU
+            acc2 += dot32(tyu, rbu, it, it * xs4);
+#endif
+        }
+    }
+    acc = subgroupClusteredAdd(acc, LPR);
+    float scale = ((pc.flags & 4u) != 0u) ? inversesqrt(sq[pc.sq_in] / float(pc.K) + pc.eps) : 1.0;
+    acc *= scale;
+#ifdef SWIGLU
+    acc2 = subgroupClusteredAdd(acc2, LPR) * scale;
+    acc = acc / (1.0 + exp(-acc)) * acc2;
+#endif
+    if (valid && lane == 0u) {
+        if (boff != 0xFFFFFFFFu) acc += f32w[boff + lrow];
+        uint o = pc.y_off + row;
+        nv = ((pc.flags & 1u) != 0u) ? y[o] + acc : acc;
+        y[o] = nv;
+        if ((pc.flags & 16u) != 0u) xw[o] = nv * f32w[pc.norm_off + row];
+    }
+    if ((pc.flags & 8u) != 0u) {
+        float t2 = subgroupAdd((valid && lane == 0u) ? nv * nv : 0.0);
+        if (subgroupElect()) red[gl_SubgroupID] = t2;
+        barrier();
+        float t = 0.0; if (gl_LocalInvocationID.x == 0u) { for (uint i = 0u; i < gl_NumSubgroups; i++) t += red[i]; }
+        sq_commit(0u, t);
+    }
+}

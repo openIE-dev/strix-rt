@@ -1,0 +1,50 @@
+#version 450
+// HunyuanVideo VAE elementwise ops, channel-last activations [t][y][x][C], grid-stride over i < n:
+//  0 im2col 3x3x3 causal conv (replicate pad: time front 2, space 1) with nearest upsample folded in (ut: time x2 except
+//    frame 0, us: space x2): B[p*kpad + k], p = p0 + i/kpad output pixel of the (Tu, Hu, Wu) volume,
+//    k = ((kt*3 + ky)*3 + kx)*C + c from f16 A [T][H][W][C]; flags 1 = 1x1x1 (k < C copy)
+//  1 store chunk: X16[(p0+p)*C + c] = f16((flags&1 ? X : 0) + Y[p*C + c] + P[b_off + c])   (activations are f16)
+//  2 GroupNorm apply: B[i] = f16(act((X[i] - mean[g]) * rstd[g] * P[b_off + c] + P[b_off + C + c])), S = (mean, rstd)[32];
+//    flags 1 = no SiLU
+//  3 f32 -> f16: B[i] = X[i]
+//  4 transpose: B[d*Wd + j] = A[j*C + d] for j < Hd rows (zero for Hd <= j < Wd)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float16_t x[]; };
+layout(std430, binding = 1) readonly buffer Y { float y[]; };
+layout(std430, binding = 2) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 3) writeonly buffer B { float16_t b[]; };
+layout(std430, binding = 4) readonly buffer P { float pr[]; };
+layout(std430, binding = 5) readonly buffer S { float st[]; };
+layout(push_constant) uniform PC { uint mode; uint n; uint C; uint T; uint Hd; uint Wd; uint p0; uint kpad; uint flags; uint ut; uint us; uint b_off; } pc;
+void op(uint i) {
+    if (pc.mode == 0u) {
+        uint p = pc.p0 + i / pc.kpad, k = i % pc.kpad; float16_t v = float16_t(0.0);
+        uint Tu = pc.ut != 0u ? 2u * pc.T - 1u : pc.T, Hu = pc.us != 0u ? 2u * pc.Hd : pc.Hd, Wu = pc.us != 0u ? 2u * pc.Wd : pc.Wd;
+        uint ox = p % Wu, q = p / Wu, oy = q % Hu, ot = q / Hu;
+        if ((pc.flags & 1u) != 0u) { if (k < pc.C) v = a[((ot * pc.Hd + oy) * pc.Wd + ox) * pc.C + k]; }
+        else if (k < 27u * pc.C) {
+            uint tap = k / pc.C, c = k - tap * pc.C, kt = tap / 9u, ky = (tap / 3u) % 3u, kx = tap % 3u;
+            int tu = max(int(ot) + int(kt) - 2, 0);
+            int yu = clamp(int(oy) + int(ky) - 1, 0, int(Hu) - 1), xu = clamp(int(ox) + int(kx) - 1, 0, int(Wu) - 1);
+            uint ts = pc.ut != 0u ? (tu == 0 ? 0u : 1u + uint(tu - 1) / 2u) : uint(tu);
+            uint ys = pc.us != 0u ? uint(yu) / 2u : uint(yu), xs = pc.us != 0u ? uint(xu) / 2u : uint(xu);
+            v = a[((ts * pc.Hd + ys) * pc.Wd + xs) * pc.C + c];
+        }
+        b[i] = v;
+    } else if (pc.mode == 1u) {
+        uint p = i / pc.C, c = i - p * pc.C, o = (pc.p0 + p) * pc.C + c;
+        x[o] = float16_t(((pc.flags & 1u) != 0u ? float(x[o]) : 0.0) + y[p * pc.C + c] + pr[pc.b_off + c]);
+    } else if (pc.mode == 2u) {
+        uint c = i % pc.C, g = c / (pc.C / 32u);
+        float v = (float(x[i]) - st[2u * g]) * st[2u * g + 1u] * pr[pc.b_off + c] + pr[pc.b_off + pc.C + c];
+        if ((pc.flags & 1u) == 0u) v = v / (1.0 + exp(-v));
+        b[i] = float16_t(v);
+    } else if (pc.mode == 3u) { b[i] = float16_t(x[i]); }
+    else {
+        uint d = i / pc.Wd, j = i % pc.Wd;
+        b[i] = j < pc.Hd ? a[j * pc.C + d] : float16_t(0.0);
+    }
+}
+void main() { uint stride = gl_NumWorkGroups.x * 256u; for (uint i = gl_WorkGroupID.x * 256u + gl_LocalInvocationID.x; i < pc.n; i += stride) op(i); }

@@ -1,0 +1,53 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+// Batched causal GQA attention, head dim 64, over the f16 KV cache. Workgroup = (16 tokens, q head); thread =
+// (token r = tid/16, 4-dim slice p = tid%16). 32 keys staged per step. Output f16 A[t][h*64 + d].
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Q { float qkv[]; };
+layout(std430, binding = 1) readonly buffer KC { uvec4 kc[]; };
+layout(std430, binding = 2) readonly buffer VC { uvec4 vc[]; };
+layout(std430, binding = 3) writeonly buffer A { float16_t a[]; };
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; uint ldp; uint pos0; float scale; uint lda; uint M; } pc;
+const uint TB = 16u, KB = 32u;
+shared uvec4 Ks[KB][8]; shared uvec4 Vs[KB][8];
+void main() {
+    uint g = gl_WorkGroupID.x, h = g % pc.n_head, tb = g / pc.n_head, tid = gl_LocalInvocationID.x;
+    uint r = tid >> 4, p = tid & 15u, t = tb * TB + r;
+    uint kvh = h / (pc.n_head / pc.n_kv);
+    bool ok = t < pc.M;
+    uint tq = min(t, pc.M - 1u), mypos = pc.pos0 + tq;
+    uint qb = tq * pc.ldp + h * 64u + p * 4u;
+    vec4 q = vec4(qkv[qb], qkv[qb + 1u], qkv[qb + 2u], qkv[qb + 3u]) * pc.scale;
+    vec4 acc = vec4(0.0); float m = -1e30, l = 0.0;
+    uint last = pc.pos0 + min(tb * TB + TB, pc.M) - 1u;
+    uint kvbase4 = (pc.cache_off + kvh * 64u) / 8u, rowstride4 = pc.n_kv * 8u;
+    for (uint k0 = 0u; k0 <= last; k0 += KB) {
+        barrier();
+        { uint j = tid >> 3, c = tid & 7u, kp = k0 + j; uvec4 kv = uvec4(0u), vv = uvec4(0u);
+          if (kp <= last) { uint ix = kvbase4 + kp * rowstride4 + c; kv = kc[ix]; vv = vc[ix]; }
+          Ks[j][c] = kv; Vs[j][c] = vv; }
+        barrier();
+        uint jn = min(KB, last + 1u - k0);
+        for (uint j = 0u; j < jn; j++) {
+            uvec4 kk = Ks[j][p >> 1]; uvec2 kh2 = (p & 1u) != 0u ? kk.zw : kk.xy;
+            vec2 k01 = unpackHalf2x16(kh2.x), k23 = unpackHalf2x16(kh2.y);
+            float s = q.x * k01.x + q.y * k01.y + q.z * k23.x + q.w * k23.y;
+            s += subgroupShuffleXor(s, 8u); s += subgroupShuffleXor(s, 4u); s += subgroupShuffleXor(s, 2u); s += subgroupShuffleXor(s, 1u);
+            if (k0 + j <= mypos) {
+                float mn = max(m, s), cr = exp(m - mn), pe = exp(s - mn);
+                l = l * cr + pe; m = mn;
+                uvec4 vk = Vs[j][p >> 1]; uvec2 vh2 = (p & 1u) != 0u ? vk.zw : vk.xy;
+                acc = acc * cr + pe * vec4(unpackHalf2x16(vh2.x), unpackHalf2x16(vh2.y));
+            }
+        }
+    }
+    if (ok) {
+        uint ob = t * pc.lda + h * 64u + p * 4u; vec4 o = acc / l;
+        a[ob] = float16_t(o.x); a[ob + 1u] = float16_t(o.y); a[ob + 2u] = float16_t(o.z); a[ob + 3u] = float16_t(o.w);
+    }
+}

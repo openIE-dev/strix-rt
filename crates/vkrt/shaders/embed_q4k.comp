@@ -1,0 +1,51 @@
+#version 450
+// x = dequant(token_embd[toks[pos]]) (Q4_K row); sq[0] = sum(x^2); zero other norm slots and the argmax key.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
+layout(std430, binding = 1) writeonly buffer X { float x[]; };
+layout(std430, binding = 2) buffer A { float sq[]; };
+layout(std430, binding = 2) buffer AU { uint au[]; };
+layout(std430, binding = 3) readonly buffer T { uint toks[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(std430, binding = 5) writeonly buffer XW { float xw[]; };
+layout(push_constant) uniform PC { uint w_off; uint K; uint norm_off; } pc;
+shared float red[8];
+vec4 XV(uint i) { return vec4(0.0); }
+#include "q4k6k.glsl"
+#ifndef AUX_POS
+#define AUX_POS 80u
+#define AUX_KEY 64u
+#endif
+void main() {
+    uint t = gl_LocalInvocationID.x, nb = pc.K / 256u;
+    uint tok = toks[au[AUX_POS]];
+    float ss = 0.0;
+    for (uint it = t; it < nb * 4u; it += 64u) {
+        uint b = it >> 2u, j = it & 3u;
+        uint base = pc.w_off + (tok * nb + b) * 36u;
+        vec2 dm = unpackHalf2x16(w[base]);
+        uint sc0, m0, sc1, m1; q4k_scales(uvec3(w[base + 1u], w[base + 2u], w[base + 3u]), j, sc0, m0, sc1, m1);
+        float d0 = dm.x * float(sc0), mm0 = dm.y * float(m0), d1 = dm.x * float(sc1), mm1 = dm.y * float(m1);
+        uint qb = base + 4u + j * 8u, xo = b * 256u + j * 64u;
+        for (uint k = 0u; k < 32u; k++) {
+            uint q = (w[qb + (k >> 2)] >> (8u * (k & 3u))) & 0xFFu;
+            float lo = d0 * float(q & 0xFu) - mm0, hi = d1 * float(q >> 4) - mm1;
+            x[xo + k] = lo; x[xo + 32u + k] = hi; xw[xo + k] = lo * f32w[pc.norm_off + xo + k]; xw[xo + 32u + k] = hi * f32w[pc.norm_off + xo + 32u + k]; ss += lo * lo + hi * hi;
+        }
+    }
+    ss = subgroupAdd(ss);
+    if (gl_SubgroupInvocationID == 0u) red[gl_SubgroupID] = ss;
+    barrier();
+    if (t == 0u) { float tot = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) tot += red[i]; sq[0] = tot; au[AUX_KEY] = 0u; au[AUX_KEY + 1u] = 0u; }
+#ifdef AUX_XWIDE
+    // xwide layout: norm slots at words [1..128) and [256..512)
+    for (uint i = t; i < 384u; i += 64u) { uint wd = i < 128u ? i : 128u + i; if (wd != 0u) sq[wd] = 0.0; }
+#else
+    else if (t < 64u) sq[t] = 0.0;
+#endif
+}

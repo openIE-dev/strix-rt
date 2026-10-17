@@ -1,0 +1,15 @@
+warm: 994561/1772813 pages were resident; MADV_POPULATE_READ ret 0 in 0.486s
+loaded in 10.67s (zero copy true)
+== stage 1: AR logits (teacher forced, 637 prefix + 750 codec)
+  ar logits (all rows)         n=5725824   cos 0.101198  rel 9.961e-1  max|d| 25.2534
+  codec argmax agreement 0/31 rows, min row cos -0.788478
+== stage 2: NAR velocity at t=1 (reference noise)
+  v0                           n=48000     cos 0.009615  rel 1.100e0  max|d| 6.2536
+  prefill gpu 2659.4 ms, one velocity gpu 1744.3 ms
+== stage 3: 32-step midpoint solve (reference noise)
+  latents                      n=48000     cos 0.499070  rel 1.069e0  max|d| 4.7520
+  solve wall 122.98s gpu 115.34s
+== stage 4: VAE decode
+  audio (ref latents)          n=2879872   cos 1.000000  rel 6.879e-4  max|d| 0.0040
+  vae wall 1.41s gpu 1.06s  (1439936 samples ref 1439936)
+  audio (our latents)          n=2879872   cos 0.135709  rel 1.523e0  max|d| 1.3119

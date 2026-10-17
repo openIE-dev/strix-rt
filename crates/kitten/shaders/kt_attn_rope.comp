@@ -1,0 +1,104 @@
+#version 450
+// Split-K (flash-decoding) single-token GQA attention over an f16 KV cache. Workgroup (head h, chunk c) handles
+// positions [c*len, min(n, (c+1)*len)) with len = ceil(n / NC), n = au[POS]+1, using an online softmax over tiles
+// of 128 positions; writes (m, l, o[D]) partials to scratch. attn_combine.comp merges the NC partials.
+// kt_attn_rope: also does the per-head q/k RMSNorm + NeoX RoPE + f16 KV store of rope_qkn.comp (same arithmetic, D = 64, subgroup 32),
+// so the rope dispatch and its barrier go away; the current position's K/V come from shared memory.
+// kitten copy: the last workgroup of each head (atomic counter in au[CNT + h]) merges the NC partials with exactly the
+// arithmetic of attn_combine.comp (bitwise-equal output), saving the combine dispatch + barrier.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const uint D = 64u;           // head dim (multiple of 4, <= 512)
+layout(std430, binding = 0) readonly buffer Q { float qb[]; };
+layout(std430, binding = 1) readonly buffer KC { f16vec4 kc4[]; };
+layout(std430, binding = 2) readonly buffer VC { f16vec4 vc4[]; };
+layout(std430, binding = 3) coherent buffer P { float part[]; };   // [h][c][2 + D]
+layout(std430, binding = 4) coherent buffer AU { uint au[]; };
+layout(std430, binding = 5) writeonly buffer O { float o[]; };
+layout(std430, binding = 6) writeonly buffer KCW { float16_t kcw[]; };
+layout(std430, binding = 7) writeonly buffer VCW { float16_t vcw[]; };
+layout(std430, binding = 8) readonly buffer F { float f32w[]; };
+const uint CNT = 49088u;
+shared bool last;
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; uint nc; uint q_stride; uint pos_word; float scale; uint q_base; uint col; float theta; uint qn; uint kn; float eps; uint k_base; uint v_base; uint n_rot; } pc;
+shared float xs[128]; shared float red4[4]; shared vec4 kcur4[D / 4u], vcur4[D / 4u];
+const uint D4 = D / 4u, G = 128u / D4;                 // position groups for the P.V product
+shared vec4 qs[D4];
+shared float ps[128];
+shared float red[8];
+shared vec4 accs[G][D4];
+void main() {
+    uint h = gl_WorkGroupID.x, c = gl_WorkGroupID.y, t = gl_LocalInvocationID.x;
+    uint kvh = h / (pc.n_head / pc.n_kv), n = au[pc.pos_word] + pc.col + 1u, stride4 = pc.n_kv * D4;
+    uint len = (n + pc.nc - 1u) / pc.nc, p0 = c * len, p1 = min(n, p0 + len);
+    { // rope_qkn for q head h (threads 0..63) and kv head kvh (64..127)
+        uint pos = n - 1u; bool isq = t < D; uint i = isq ? t : t - D;
+        float v = isq ? qb[pc.q_base + h * pc.q_stride + i] : qb[pc.k_base + kvh * D + i];
+        float ss = subgroupAdd(v * v); if (subgroupElect()) red4[gl_SubgroupID] = ss;
+        barrier();
+        float tot = 0.0; uint s0 = isq ? 0u : 2u; tot += red4[s0]; tot += red4[s0 + 1u];
+        float xn = v * inversesqrt(tot / float(D) + pc.eps) * f32w[(isq ? pc.qn : pc.kn) + i];
+        uint xb = isq ? 0u : D; xs[xb + i] = xn;
+        barrier();
+        float r = xn; uint half_ = pc.n_rot / 2u;
+        if (i < pc.n_rot) { uint j = i % half_; float a = float(pos) * pow(pc.theta, -float(2u * j) / float(pc.n_rot)); float c_ = cos(a), s_ = sin(a);
+            r = i < half_ ? xs[xb + i] * c_ - xs[xb + i + half_] * s_ : xs[xb + i - half_] * s_ + xs[xb + i] * c_; }
+        if (isq) { qs[i / 4u][i % 4u] = r * pc.scale; }
+        else { float16_t kh = float16_t(r), vh = float16_t(qb[pc.v_base + kvh * D + i]); kcur4[i / 4u][i % 4u] = float(kh); vcur4[i / 4u][i % 4u] = float(vh);
+            uint clast = pos / len; if (c == clast && h % (pc.n_head / pc.n_kv) == 0u) { uint co = pc.cache_off + pos * pc.n_kv * D + kvh * D + i; kcw[co] = kh; vcw[co] = vh; } }
+    }
+    barrier();
+    uint base4 = (pc.cache_off >> 2) + kvh * D4;
+    float m = -1e30, l = 0.0;
+    uint grp = t / D4, ln = t % D4;
+    vec4 acc = vec4(0.0);
+    for (uint tb = p0; tb < p1; tb += 128u) {
+        uint p = tb + t;
+        float s = -1e30;
+        if (p < p1) { s = 0.0; uint b = base4 + p * stride4; if (p == n - 1u) { for (uint d = 0u; d < D4; d++) s += dot(qs[d], kcur4[d]); } else { for (uint d = 0u; d < D4; d++) s += dot(qs[d], vec4(kc4[b + d])); } }
+        float tm = subgroupMax(s);
+        if (subgroupElect()) red[gl_SubgroupID] = tm;
+        barrier();
+        tm = red[0]; for (uint i = 1u; i < gl_NumSubgroups; i++) tm = max(tm, red[i]);
+        float mn = max(m, tm), corr = exp(m - mn);
+        float e = p < p1 ? exp(s - mn) : 0.0;
+        ps[t] = e;
+        barrier();   // ps visible; red free again
+        float ts = subgroupAdd(e);
+        if (subgroupElect()) red[gl_SubgroupID] = ts;
+        acc *= corr;
+        uint te = min(128u, p1 - tb);
+        for (uint j = grp; j < te; j += G) acc += ps[j] * (tb + j == n - 1u ? vcur4[ln] : vec4(vc4[base4 + (tb + j) * stride4 + ln]));
+        barrier();
+        ts = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) ts += red[i];
+        l = l * corr + ts; m = mn;
+        barrier();   // before red/ps reuse
+    }
+    accs[grp][ln] = acc;
+    barrier();
+    uint ob = (h * pc.nc + c) * (2u + D);
+    if (t == 0u) { part[ob] = m; part[ob + 1u] = l; }
+    for (uint i = t; i < D4; i += 128u) {
+        vec4 r = vec4(0.0); for (uint g = 0u; g < G; g++) r += accs[g][i];
+        part[ob + 2u + 4u * i] = r.x; part[ob + 3u + 4u * i] = r.y; part[ob + 4u + 4u * i] = r.z; part[ob + 5u + 4u * i] = r.w;
+    }
+    memoryBarrierBuffer(); barrier();
+    if (t == 0u) { last = atomicAdd(au[CNT + h], 1u) == pc.nc - 1u; }
+    barrier();
+    if (!last) return;
+    memoryBarrierBuffer();
+    float M = -1e30;
+    for (uint cc = 0u; cc < pc.nc; cc++) M = max(M, part[(h * pc.nc + cc) * (2u + D)]);
+    float L = 0.0;
+    for (uint cc = 0u; cc < pc.nc; cc++) { uint b = (h * pc.nc + cc) * (2u + D); L += exp(part[b] - M) * part[b + 1u]; }
+    for (uint i = t; i < D; i += 128u) {
+        float a = 0.0;
+        for (uint cc = 0u; cc < pc.nc; cc++) { uint b = (h * pc.nc + cc) * (2u + D); a += exp(part[b] - M) * part[b + 2u + i]; }
+        a /= L;
+        o[h * D + i] = a;
+    }
+    if (t == 0u) au[CNT + h] = 0u;
+}

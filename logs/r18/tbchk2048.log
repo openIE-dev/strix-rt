@@ -1,0 +1,17 @@
+[waited 630s for GPU lock; start 04:44:40]
+weights: copied in 1.127s, 4 arenas/imports (6851 MiB), 498 quant tensors, 2645504 f32 floats
+hadamard: 401 rotated weights, inverse embed true, sign widths [5120, 6144, 17408], gdn perm (128, 16, 3)
+[npu split] weights folded in 5.7 s
+[npu split] 384 calls, npu 2149.4 ms, host wait for prep 1123.3 ms, total so far 3912.6 ms
+[npu split] 5120x17408 nn=17408: 64 x 11.94 ms, 5120x17408/up nn=17408: 64 x 9.11 ms, 17408x5120/kc0 nn=5120: 64 x 3.18 ms, 17408x5120/kc1 nn=5120: 64 x 3.02 ms, 17408x5120/kc2 nn=5120: 64 x 3.00 ms, 17408x5120/kc3 nn=5120: 64 x 3.35 ms
+[npu split] 768 calls, npu 4178.3 ms, host wait for prep 2256.3 ms, total so far 3800.2 ms
+[npu split] 5120x17408 nn=17408: 128 x 10.95 ms, 5120x17408/up nn=17408: 128 x 9.11 ms, 17408x5120/kc0 nn=5120: 128 x 3.14 ms, 17408x5120/kc1 nn=5120: 128 x 3.02 ms, 17408x5120/kc2 nn=5120: 128 x 3.05 ms, 17408x5120/kc3 nn=5120: 128 x 3.38 ms
+rep-to-rep logits max|diff| 0.00000
+logits cosine 0.999993, top10 overlap 10/10, top5 pf [248046, 8, 625, 62, 198] ref [248046, 8, 625, 62, 198]
+top5 ref logits pf [5.9099064, 4.953917, 4.492596, 4.4898796, 4.4764237] ref [5.906638, 4.9584045, 4.48141, 4.4700713, 4.4591627]
+L=2048: logits max|diff| 0.0577 (max|ref| 10.72), argmax pf 248046 ref 248046, first tok 248046
+greedy continuation agreement 16/16
+  pf  [248046, 198, 248046, 198, 248045, 198, 248046, 198, 248045, 248046, 198, 248045, 248046, 198, 248045, 248046]
+  ref [248046, 198, 248046, 198, 248045, 198, 248046, 198, 248045, 248046, 198, 248045, 248046, 198, 248045, 248046]
+prefill 2048 tokens: 3836.8 ms -> pp2048 533.78 tok/s   (token-by-token generate incl. 16 new: 76063.5 ms)
+[end 04:47:28; exit 0; ran under GPU lock]

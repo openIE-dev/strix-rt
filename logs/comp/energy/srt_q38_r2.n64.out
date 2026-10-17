@@ -1,0 +1,25 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+warm: 3935233/4019639 pages were resident; MADV_POPULATE_READ ret 0 in 0.105s
+weights: zero-copy dmabuf in 0.254s, 67 arenas/imports (15824 MiB), 506 quant tensors, 2671616 f32 floats
+ids: [271, 12, 2972, 17, 22, 17501, 1317, 220, 17, 23, 19, 9343, 92217, 561, 348, 3417, 5528, 344, 9, 318, 21453, 33145, 4031, 8, 1172, 5963, 350, 321, 780, 72345, 13, 695, 12, 2972, 17, 23, 19, 1317, 220, 18, 24, 20, 9343, 92217, 561, 348, 22102, 3171, 9, 318, 65297, 33145, 4031, 8, 6941, 440, 7521, 499, 1112, 1068, 725, 29257, 13, 695]
+text: 
+
+- **27 BC – 284 AD**: The *Principate* (early imperial period) under Augustus and his successors. 
+- **284 – 395 AD**: The *Dominate* (later imperial period) beginning with Diocletian’s reforms. 
+
+prompt 12 steps: GPU 0.881s wall 0.966s | decode 63 tok: wall 4.632s = 13.60 tok/s; GPU 73.489 ms/tok = 13.61 tok/s
+duration 6.050 s, 122 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package       691.240     114.25       10.95      625.002  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores          10.216       1.69        0.47        7.351  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu        9.421       1.56        1.60       -0.245  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        0.267       0.04        0.03        0.075  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx               387.381      64.03       21.50      257.295  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other         200.967      33.22       18.56       88.686  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket            597.769      98.80       41.66      345.736  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon         593.989      98.18       41.31      344.077  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

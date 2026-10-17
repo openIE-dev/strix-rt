@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// Row LayerNorm (one workgroup per row): n = (x - mean) / sqrt(var + eps) * w (+ b).
+// mode bit0: A[t] = f16(n); bit1: Y[t] = n (+ f32b[add_off..]) (may alias X).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 2) readonly buffer F { float f[]; };
+layout(std430, binding = 3) buffer Y { float y[]; };
+layout(push_constant) uniform PC { uint D; uint lda; uint w_off; uint b_off; float eps; uint mode; uint add_off; } pc;
+shared float red[256];
+void main() {
+    uint t = gl_WorkGroupID.x, l = gl_LocalInvocationID.x, xb = t * pc.D;
+    float s = 0.0; for (uint i = l; i < pc.D; i += 256u) s += x[xb + i];
+    red[l] = s; barrier(); for (uint o = 128u; o > 0u; o >>= 1) { if (l < o) red[l] += red[l + o]; barrier(); }
+    float mean = red[0] / float(pc.D); barrier();
+    float v = 0.0; for (uint i = l; i < pc.D; i += 256u) { float d = x[xb + i] - mean; v += d * d; }
+    red[l] = v; barrier(); for (uint o = 128u; o > 0u; o >>= 1) { if (l < o) red[l] += red[l + o]; barrier(); }
+    float r = inversesqrt(red[0] / float(pc.D) + pc.eps);
+    for (uint i = l; i < pc.D; i += 256u) {
+        float n = (x[xb + i] - mean) * r * f[pc.w_off + i]; if (pc.b_off != 0xffffffffu) n += f[pc.b_off + i];
+        if ((pc.mode & 1u) != 0u) a[t * pc.lda + i] = float16_t(n);
+        if ((pc.mode & 2u) != 0u) y[xb + i] = n + (pc.add_off != 0xffffffffu ? f[pc.add_off + i] : 0.0);
+    }
+}

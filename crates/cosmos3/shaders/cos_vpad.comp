@@ -1,0 +1,34 @@
+#version 450
+// Qwen3-VL ViT attention prep. mode 0: Y f32 [n][3*dm] (q|k|v, no bias) + P[b_off..] bias -> f16 q, k, v [n][H*128] with head
+// dims zero-padded to 128 (qimage flash); q and k get the axial 2D rope (rotate_half over hd = 72, angles R [n][hd/2] (cos, sin)).
+// mode 1 (unpad): Q = flash output f16 [n][H*128] -> K = f16 [n][H*hd].
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Y { float y[]; };
+layout(std430, binding = 1) buffer Q { float16_t q[]; };
+layout(std430, binding = 2) buffer K { float16_t k[]; };
+layout(std430, binding = 3) buffer V { float16_t v[]; };
+layout(std430, binding = 4) readonly buffer P { float p[]; };
+layout(std430, binding = 5) readonly buffer R { vec2 rr[]; };
+layout(push_constant) uniform PC { uint mode; uint n; uint H; uint hd; uint b_off; } pc;
+void main() {
+    uint g = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u;
+    uint dm = pc.H * pc.hd, W = pc.H * 128u, half_ = pc.hd / 2u;
+    if (pc.mode == 0u) {
+        if (g >= pc.n * W) return;
+        uint r = g / W, c = g - r * W, h = c / 128u, i = c - h * 128u;
+        if (i >= pc.hd) { q[g] = float16_t(0.0); k[g] = float16_t(0.0); v[g] = float16_t(0.0); return; }
+        uint s = r * 3u * dm + h * pc.hd, b = pc.b_off + h * pc.hd;
+        uint j = i < half_ ? i : i - half_, o = i < half_ ? i + half_ : i - half_; float sg = i < half_ ? -1.0 : 1.0;
+        vec2 cs = rr[r * half_ + j];
+        float qa = y[s + i] + p[b + i], qb = y[s + o] + p[b + o];
+        float ka = y[s + dm + i] + p[b + dm + i], kb = y[s + dm + o] + p[b + dm + o];
+        q[g] = float16_t(qa * cs.x + sg * qb * cs.y); k[g] = float16_t(ka * cs.x + sg * kb * cs.y);
+        v[g] = float16_t(y[s + 2u * dm + i] + p[b + 2u * dm + i]);
+    } else {
+        if (g >= pc.n * dm) return;
+        uint r = g / dm, c = g - r * dm, h = c / pc.hd, i = c - h * pc.hd;
+        k[g] = q[r * W + h * 128u + i];
+    }
+}

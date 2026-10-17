@@ -1,0 +1,49 @@
+#version 450
+// Chunked Mamba-2 scan for prefill: one workgroup per SSM head, lane n owns state column s[:, n] in registers for the
+// whole chunk of M tokens (loaded once, stored once). Per token: s = s*dA + B x dt; y = s.C + D x; y *= silu(z).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const uint HD = 80u;
+layout(constant_id = 1) const uint PS = 1u;   // head-dim split: PS workgroups per head, each owns HD/PS state rows (same per-element arithmetic)
+const uint HDL = HD / PS;
+layout(std430, binding = 0) readonly buffer Z { float zx[]; };      // in_proj output [M][ldy] (z at 0, dt at dt_off)
+layout(std430, binding = 1) readonly buffer XB { float xbc[]; };    // conv output [M][ch]
+layout(std430, binding = 2) buffer S { float st[]; };
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };      // [M][d_inner]
+layout(std430, binding = 4) readonly buffer F { float f[]; };
+layout(push_constant) uniform PC { uint d_inner; uint n_group; uint n_head; uint st_off; uint a_off; uint d_off; uint dtb_off; uint dt_off; uint m; uint ldy; uint ch; } pc;
+shared float xs[HDL];
+shared float red[HDL][4];
+shared float sdt;
+void main() {
+    uint h = gl_WorkGroupID.x / PS, pb = (gl_WorkGroupID.x % PS) * HDL, n = gl_LocalInvocationID.x, g = h / (pc.n_head / pc.n_group);
+    uint base = pc.st_off + (h * HD + pb) * 128u + n;
+    float s[HDL];
+    [[unroll]] for (uint p = 0u; p < HDL; p++) s[p] = st[base + p * 128u];
+    float A = f[pc.a_off + h], Dh = f[pc.d_off + h], dtb = f[pc.dtb_off + h];
+    for (uint t = 0u; t < pc.m; t++) {
+        uint xr = t * pc.ch;
+        float Bn = xbc[xr + pc.d_inner + g * 128u + n], Cn = xbc[xr + pc.d_inner + pc.n_group * 128u + g * 128u + n];
+        for (uint i = n; i < HDL; i += 128u) xs[i] = xbc[xr + h * HD + pb + i];
+        float dt = zx[t * pc.ldy + pc.dt_off + h] + dtb;
+        dt = dt <= 20.0 ? log(1.0 + exp(dt)) : dt;
+        float dA = exp(dt * A);
+        barrier();
+        [[unroll]] for (uint p = 0u; p < HDL; p++) {
+            s[p] = s[p] * dA + Bn * (xs[p] * dt);
+            float r = subgroupAdd(s[p] * Cn);
+            if (subgroupElect()) red[p][gl_SubgroupID] = r;
+        }
+        barrier();
+        for (uint p = n; p < HDL; p += 128u) {
+            float a = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) a += red[p][i];
+            a += xs[p] * Dh;
+            float z = zx[t * pc.ldy + h * HD + pb + p];
+            y[t * pc.d_inner + h * HD + pb + p] = a * (z / (1.0 + exp(-z)));
+        }
+        barrier();
+    }
+    [[unroll]] for (uint p = 0u; p < HDL; p++) st[base + p * 128u] = s[p];
+}

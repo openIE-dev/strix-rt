@@ -1,0 +1,44 @@
+[start 19:29:31]
+perf level high
+=== q38
+llama q38:
+| qwen35 27B Q4_K - Medium       |  15.32 GiB |    27.32 B | Vulkan     |  99 |           pp512 |        448.72 ± 0.41 |
+| qwen35 27B Q4_K - Medium       |  15.32 GiB |    27.32 B | Vulkan     |  99 |          pp2048 |        435.70 ± 6.71 |
+[busy after: YES]
+strix before pp512: median 1790.0 ms -> 286.03 tok/s (reps  1799 1779 1801 1813 1559) | prefill 512: best 1559.7 ms (all [1741, 1799, 1779, 1801, 1813, 1559]) -> pp512 328.26 tok/s [busy after: no]
+strix after pp512: median 1552.0 ms -> 329.90 tok/s (reps  1535 1575 1558 1529 1546) | prefill 512: best 1529.4 ms (all [1594, 1535, 1575, 1558, 1529, 1546]) -> pp512 334.78 tok/s [busy after: no]
+strix before pp2048: median 6331.0 ms -> 323.49 tok/s (reps  6291 6304 6419 6358 6266) | prefill 2048: best 6266.4 ms (all [6284, 6291, 6304, 6419, 6358, 6266]) -> pp2048 326.82 tok/s [busy after: no]
+strix after pp2048: median 4465.5 ms -> 458.63 tok/s (reps  4443 4457 4441 4749 4474) | prefill 2048: best 4442.0 ms (all [4450, 4443, 4457, 4441, 4749, 4474]) -> pp2048 461.06 tok/s [busy after: no]
+=== lfm2
+llama lfm2:
+| lfm2moe 24B.A2B Q4_K - Medium  |  13.52 GiB |    23.97 B | Vulkan     |  99 |           pp512 |      2257.95 ± 14.59 |
+| lfm2moe 24B.A2B Q4_K - Medium  |  13.52 GiB |    23.97 B | Vulkan     |  99 |          pp2048 |       2253.93 ± 8.15 |
+[busy after: no]
+strix before pp512: median 255.0 ms -> 2007.84 tok/s (reps  255 255 255 254 255) | prefill 512: best 254.5 ms (all [256, 255, 255, 255, 254, 255]) -> pp512 2011.86 tok/s [busy after: no]
+strix after pp512: median 228.0 ms -> 2245.61 tok/s (reps  229 229 229 227 227) | prefill 512: best 228.0 ms (all [231, 229, 229, 229, 227, 227]) -> pp512 2246.04 tok/s [busy after: no]
+strix before pp2048: median 812.0 ms -> 2522.17 tok/s (reps  844 812 812 812 814) | prefill 2048: best 812.1 ms (all [926, 844, 812, 812, 812, 814]) -> pp2048 2522.00 tok/s [busy after: no]
+strix after pp2048: median 840.0 ms -> 2438.10 tok/s (reps  840 840 838 840 842) | prefill 2048: best 838.9 ms (all [840, 840, 840, 838, 840, 842]) -> pp2048 2441.31 tok/s [busy after: no]
+=== pq2
+llama pq2:
+| qwen35 27B PQ2_0 - 2.13 bpw (group 128) |   6.70 GiB |    26.90 B | Vulkan     |  99 |           pp512 |        304.74 ± 1.08 |
+| qwen35 27B PQ2_0 - 2.13 bpw (group 128) |   6.70 GiB |    26.90 B | Vulkan     |  99 |          pp2048 |        295.99 ± 4.60 |
+[busy after: no]
+strix before pp512: median 1818.0 ms -> 281.63 tok/s (reps  1723 1980 1777 1815 1821) | prefill 512: best 1666.8 ms (all [1666, 1723, 1980, 1777, 1815, 1821]) -> pp512 307.17 tok/s [busy after: no]
+strix after pp512: median 1834.0 ms -> 279.17 tok/s (reps  1764 1835 1841 1781 1833) | prefill 512: best 1764.1 ms (all [1783, 1764, 1835, 1841, 1781, 1833]) -> pp512 290.23 tok/s [busy after: no]
+strix before pp2048: median 7254.0 ms -> 282.33 tok/s (reps  7270 7259 7301 7003 7249) | prefill 2048: best 7003.7 ms (all [7403, 7270, 7259, 7301, 7003, 7249]) -> pp2048 292.42 tok/s [busy after: no]
+strix after pp2048: median 6619.0 ms -> 309.41 tok/s (reps  7358 7162 6599 6639 6587) | prefill 2048: best 6587.5 ms (all [7292, 7358, 7162, 6599, 6639, 6587]) -> pp2048 310.89 tok/s [busy after: no]
+=== ptq1
+llama ptq1:
+| qwen35 27B PTQ1_0 - 1.75 bpw ternary (group 128) |   5.53 GiB |    26.90 B | Vulkan     |  99 |           pp512 |        205.43 ± 3.23 |
+| qwen35 27B PTQ1_0 - 1.75 bpw ternary (group 128) |   5.53 GiB |    26.90 B | Vulkan     |  99 |          pp2048 |        205.13 ± 1.89 |
+[busy after: no]
+strix before pp512: median 1780.5 ms -> 287.56 tok/s (reps  1789 1780 1781 1774 1822) | prefill 512: best 1774.1 ms (all [1776, 1789, 1780, 1781, 1774, 1822]) -> pp512 288.59 tok/s [busy after: YES]
+strix after pp512: median 1754.0 ms -> 291.90 tok/s (reps  1755 1754 1754 1754 1757) | prefill 512: best 1754.1 ms (all [1765, 1755, 1754, 1754, 1754, 1757]) -> pp512 291.89 tok/s [busy after: no]
+strix before pp2048: median 7164.0 ms -> 285.87 tok/s (reps  7122 7138 7154 7415 7174) | prefill 2048: best 7120.3 ms (all [7120, 7122, 7138, 7154, 7415, 7174]) -> pp2048 287.63 tok/s [busy after: no]
+strix after pp2048: median 7199.0 ms -> 284.48 tok/s (reps  7189 7191 7202 7214 7196) | prefill 2048: best 7172.7 ms (all [7172, 7189, 7191, 7202, 7214, 7196]) -> pp2048 285.53 tok/s [busy after: no]
+=== lfm2 greedy check (pf before vs after, L=512 and 2048)
+before L=512: L=512: logits max|diff| 0.8112 (max|ref| 9.70), argmax pf 10932 ref 10932, first tok 10932   pf  [10932, 229, 25, 23, 26, 229, 25, 23] 
+after L=512: L=512: logits max|diff| 0.8220 (max|ref| 9.69), argmax pf 10932 ref 10932, first tok 10932   pf  [10932, 229, 25, 23, 26, 229, 25, 23] 
+before L=2048: L=2048: logits max|diff| 7.0016 (max|ref| 7.19), argmax pf 816 ref 207, first tok 816   pf  [816, 229, 26, 22, 26, 22, 26, 22] 
+after L=2048: L=2048: logits max|diff| 6.9886 (max|ref| 7.18), argmax pf 816 ref 207, first tok 816   pf  [816, 229, 26, 22, 26, 22, 26, 22] 
+restored perf level: auto [end 19:50:24]

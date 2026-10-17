@@ -1,0 +1,19 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+preprocess img/dusk256.png -> 512x512 (256 tokens) CPU 6.75 ms
+preprocess CPU median 2.12 ms over 200 runs
+encoded 256 tokens x 4096: median 154.8 ms (GPU wall, 200 runs)
+duration 34.850 s, 698 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package      2653.919      76.15        7.78     2382.813  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores          39.486       1.13        0.40       25.671  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu       38.489       1.10        1.53      -14.937  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        0.706       0.02        0.02        0.129  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx              1199.290      34.41        0.00     1199.220  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other        1392.701      39.96        8.07     1111.393  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket           2630.481      75.48        9.61     2295.676  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon        2613.298      74.99        9.14     2294.877  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

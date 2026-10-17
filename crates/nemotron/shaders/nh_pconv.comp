@@ -1,0 +1,21 @@
+#version 450
+// Batched Mamba-2 conv1d (kernel 4) + SiLU over M tokens of the in_proj output Y [M][ldy]; reads/updates the conv state.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer I { float yv[]; };
+layout(std430, binding = 1) buffer S { float st[]; };
+layout(std430, binding = 2) writeonly buffer O { float o[]; };
+layout(std430, binding = 3) readonly buffer F { float f[]; };
+layout(push_constant) uniform PC { uint ch; uint in_off; uint st_off; uint w_off; uint b_off; uint m; uint ldy; } pc;
+void main() {
+    uint c = gl_GlobalInvocationID.x; if (c >= pc.ch) return;
+    uint sb = pc.st_off + c * 3u, wb = pc.w_off + c * 4u;
+    float s0 = st[sb], s1 = st[sb + 1u], s2 = st[sb + 2u];
+    float w0 = f[wb], w1 = f[wb + 1u], w2 = f[wb + 2u], w3 = f[wb + 3u], bb = f[pc.b_off + c];
+    for (uint t = 0u; t < pc.m; t++) {
+        float xv = yv[t * pc.ldy + pc.in_off + c];
+        float a = w0 * s0; a += w1 * s1; a += w2 * s2; a += w3 * xv; a += bb;
+        s0 = s1; s1 = s2; s2 = xv;
+        o[t * pc.ch + c] = a / (1.0 + exp(-a));
+    }
+    st[sb] = s0; st[sb + 1u] = s1; st[sb + 2u] = s2;
+}

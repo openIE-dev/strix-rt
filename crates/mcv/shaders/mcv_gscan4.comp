@@ -1,0 +1,54 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_KHR_shader_subgroup_basic : require
+// mcv GDN scan with the 128-wide row dot split over 4 lanes: thread (row i, part p = lane % 4) owns S[h][i][32p..32p+32)
+// (8 vec4 registers); S.k and S.q are reduced with 4-lane clustered adds. The serial per-token chain is ~4x shorter than
+// pf_gdn_scan (one thread per row), which is latency-bound with only nv workgroups. 64 rows per workgroup, 2 per head.
+// Recurrence: S_i *= exp(g); d_i = (v_i - S_i.k) * beta; S_i += d_i k; o_i = S_i.q.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer CV { float cv[]; };
+layout(std430, binding = 1) readonly buffer PR { float pr[]; };
+layout(std430, binding = 2) buffer S { vec4 s4[]; };
+layout(std430, binding = 3) writeonly buffer O { float o[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint nk; uint nv; uint s_off4; uint a_off; uint b_off; uint dt_off; uint A_off; uint ldp; uint ldc; uint M; } pc;
+layout(constant_id = 0) const uint CH = 16u;   // tokens staged per chunk
+shared vec4 ks[CH][32]; shared vec4 qs[CH][32]; shared float vs[CH][64]; shared float dec[CH]; shared float bet[CH];
+void main() {
+    uint h = gl_WorkGroupID.x / 2u, rb = gl_WorkGroupID.x % 2u, l = gl_LocalInvocationID.x, p = l & 3u, ri = l >> 2, i = rb * 64u + ri, kh = h % pc.nk;
+    vec4 s[8];
+    uint sb = pc.s_off4 + (h * 128u + i) * 32u + p * 8u;
+    [[unroll]] for (uint j = 0u; j < 8u; j++) s[j] = s4[sb + j];
+    float dtb = f32w[pc.dt_off + h], Ah = f32w[pc.A_off + h];
+    for (uint t0 = 0u; t0 < pc.M; t0 += CH) {
+        uint n = min(CH, pc.M - t0);
+        barrier();
+        for (uint e = l; e < n * 64u; e += 256u) {
+            uint tt = e / 64u, q = e % 64u, cb = (t0 + tt) * pc.ldc;
+            if (q < 32u) { uint b = cb + kh * 128u + 4u * q; qs[tt][q] = vec4(cv[b], cv[b + 1u], cv[b + 2u], cv[b + 3u]); }
+            else { uint b = cb + pc.nk * 128u + kh * 128u + 4u * (q - 32u); ks[tt][q - 32u] = vec4(cv[b], cv[b + 1u], cv[b + 2u], cv[b + 3u]); }
+        }
+        for (uint e = l; e < n * 64u; e += 256u) { uint tt = e / 64u, r = e % 64u; vs[tt][r] = cv[(t0 + tt) * pc.ldc + 2u * pc.nk * 128u + h * 128u + rb * 64u + r]; }
+        if (l < n) {
+            uint pb = (t0 + l) * pc.ldp;
+            float al = pr[pb + pc.a_off + h] + dtb;
+            float sp = al > 20.0 ? al : log(1.0 + exp(al));
+            dec[l] = exp(sp * Ah);
+            bet[l] = 1.0 / (1.0 + exp(-pr[pb + pc.b_off + h]));
+        }
+        barrier();
+        for (uint tt = 0u; tt < n; tt++) {
+            float d = dec[tt];
+            vec4 a0 = vec4(0.0);
+            [[unroll]] for (uint j = 0u; j < 8u; j++) { s[j] *= d; a0 += s[j] * ks[tt][p * 8u + j]; }
+            float a = subgroupClusteredAdd(a0.x + a0.y + a0.z + a0.w, 4u);
+            float dl = (vs[tt][ri] - a) * bet[tt];
+            vec4 b0 = vec4(0.0);
+            [[unroll]] for (uint j = 0u; j < 8u; j++) { s[j] += dl * ks[tt][p * 8u + j]; b0 += s[j] * qs[tt][p * 8u + j]; }
+            float b = subgroupClusteredAdd(b0.x + b0.y + b0.z + b0.w, 4u);
+            if (p == 0u) o[(t0 + tt) * pc.nv * 128u + h * 128u + i] = b;
+        }
+    }
+    [[unroll]] for (uint j = 0u; j < 8u; j++) s4[sb + j] = s[j];
+}

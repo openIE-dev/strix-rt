@@ -1,0 +1,27 @@
+== hostimport COLD (shim, shared_ro)
+host import ext: true, mode shared_ro
+imported 28 tensors, 1019.8 MiB in 0.199s (5.38 GB/s), memory flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED
+copied into DL|HV buffers in 0.127s
+imported vs copied result max |diff| = 0e0
+empty submit+wait (with imports/copies alive): 1364.2 us
+GEMV imported(mmap): 18944x3584 Q4_K, 225.1 us/call, 170.1 GB/s (66.4% of 256), cycling 28 tensors
+GEMV copied: 18944x3584 Q4_K, 188.5 us/call, 203.1 GB/s (79.3% of 256), cycling 28 tensors
+== hostimport WARM + empty-submit overhead, DROP_IMPORTS
+empty submit+wait (with imports/copies alive): 1094.8 us
+GEMV imported(mmap): 18944x3584 Q4_K, 226.4 us/call, 169.1 GB/s (66.1% of 256), cycling 28 tensors
+GEMV copied: 18944x3584 Q4_K, 194.3 us/call, 197.0 GB/s (77.0% of 256), cycling 28 tensors
+empty submit+wait (imports freed, copies alive): 23.2 us
+== strix gen COLD ZEROCOPY (whole model from SSD via page faults at import)
+weights imported zero-copy in 0.620s
+load 0.73s, gemv ls=64 sg=32
+decode: 32 tok in 0.887s wall = 36.08 tok/s; GPU-only 23.03 ms/tok = 43.43 tok/s
+wall 1.98s maxrss 4368468KB
+== strix gen COLD copied
+weights copied in 0.942s
+load 1.07s, gemv ls=64 sg=32
+decode: 32 tok in 0.726s wall = 44.06 tok/s; GPU-only 20.94 ms/tok = 47.76 tok/s
+wall 2.12s maxrss 4368448KB
+== strix gen WARM ZEROCOPY rss
+weights imported zero-copy in 0.176s
+decode: 32 tok in 0.992s wall = 32.27 tok/s; GPU-only 24.32 ms/tok = 41.12 tok/s
+wall 1.63s maxrss 4368548KB

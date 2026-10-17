@@ -1,0 +1,19 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+preprocess img/qi_1500x1001.png -> 1504x992 (1457 tokens) CPU 33.15 ms
+preprocess CPU median 16.69 ms over 20 runs
+encoded 1457 tokens x 4096: median 1578.2 ms (GPU wall, 20 runs)
+duration 35.900 s, 719 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package      3214.858      89.55       28.38     2195.883  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores         197.824       5.51       11.88     -228.621  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu      204.179       5.69        8.93     -116.475  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        4.588       0.13        0.62      -17.493  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx              1369.394      38.14       13.48      885.363  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other        1607.513      44.78       28.68      577.915  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket           3181.087      88.61       51.09     1346.804  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon        3164.621      88.15       50.67     1345.652  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

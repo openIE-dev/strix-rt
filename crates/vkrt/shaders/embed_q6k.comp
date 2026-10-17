@@ -1,0 +1,38 @@
+#version 450
+// x = dequant(token_embd[toks[au[160]]]) (Q6_K row); xw = x * norm_w; sq[0] = sum(x^2); zero sq[1..128) and the argmax key
+// (wide aux layout: key at words 128..129). Workgroup of 256.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
+layout(std430, binding = 1) writeonly buffer X { float x[]; };
+layout(std430, binding = 2) buffer A { float sq[]; };
+layout(std430, binding = 2) buffer AU { uint au[]; };
+layout(std430, binding = 3) readonly buffer T { uint toks[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(std430, binding = 5) writeonly buffer XW { float xw[]; };
+layout(push_constant) uniform PC { uint w_off; uint K; uint norm_off; } pc;
+shared float red[8];
+uint byt(uint base, uint bo) { return (uint(w16[base + (bo >> 1)]) >> (8u * (bo & 1u))) & 0xFFu; }
+void main() {
+    uint t = gl_LocalInvocationID.x, nb = pc.K / 256u;
+    uint tok = toks[au[160]];
+    float ss = 0.0;
+    for (uint i = t; i < pc.K; i += 256u) {
+        uint b = i >> 8, r = i & 255u, n = r >> 7, q = (r >> 5) & 3u, l = r & 31u;
+        uint base = pc.w_off + (tok * nb + b) * 105u;
+        uint ql = byt(base, n * 64u + (q & 1u) * 32u + l) >> ((q >> 1) * 4u) & 0xFu;
+        uint qh = (byt(base, 128u + n * 32u + l) >> (q * 2u)) & 3u;
+        int sc = int(byt(base, 192u + n * 8u + (l >> 4) + q * 2u)); if (sc > 127) sc -= 256;
+        float d = unpackHalf2x16(uint(w16[base + 104u])).x;
+        float v = d * float(sc) * float(int(ql | (qh << 4)) - 32);
+        x[i] = v; xw[i] = v * f32w[pc.norm_off + i]; ss += v * v;
+    }
+    ss = subgroupAdd(ss);
+    if (subgroupElect()) red[gl_SubgroupID] = ss;
+    barrier();
+    if (t == 0u) { float tot = 0.0; for (uint s = 0u; s < gl_NumSubgroups; s++) tot += red[s]; sq[0] = tot; au[128] = 0u; au[129] = 0u; }
+    else if (t < 128u) sq[t] = 0.0;
+}

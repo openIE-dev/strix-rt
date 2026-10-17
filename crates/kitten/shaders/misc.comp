@@ -1,0 +1,62 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// decoder ops that used to fall back to the CPU. One thread per output element.
+// mode 0 conv_transpose1d, 1 pad (reflect / constant, last dim, contiguous rows), 2 stft (onesided, contiguous [B, L]), 3 istft (center, onesided, contiguous [B, nb, fr, 2])
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer A { float m[]; };
+layout(push_constant) uniform P { uint mode, n; uint u[22]; } p;
+const float TAU = 6.28318530717958647692;
+void main() {
+    uint id = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * 65535u * 256u; if (id >= p.n) return;
+    if (p.mode == 0u) { // u: x_off, x_sb, x_sc, x_sl, w_off, o_off, bias_off, C, O, L, K, S, PAD, LO
+        uint xo = p.u[0], wo = p.u[4], oo = p.u[5], bo = p.u[6], C = p.u[7], O = p.u[8], L = p.u[9], K = p.u[10], S = p.u[11], PD = p.u[12], LO = p.u[13];
+        uint t = id % LO, o = (id / LO) % O, b = id / (LO * O);
+        float acc = bo != 0xffffffffu ? m[bo + o] : 0.0;
+        int tp = int(t) + int(PD);
+        uint k0 = uint(tp) % S;
+        for (uint k = k0; k < K; k += S) { int j = (tp - int(k)) / int(S); if (j < 0 || j >= int(L)) continue;
+            uint xb = xo + b * p.u[1] + uint(j) * p.u[3], wb = wo + o * K + k;
+            for (uint c = 0u; c < C; c++) acc = fma(m[xb + c * p.u[2]], m[wb + c * O * K], acc); }
+        m[oo + id] = acc;
+    } else if (p.mode == 1u) { // u: x_off, o_off, N, left, right, reflect, val(bits)
+        uint NO = p.u[2] + p.u[3] + p.u[4]; uint row = id / NO, i = id % NO; int j = int(i) - int(p.u[3]); int N = int(p.u[2]); float v;
+        if (j >= 0 && j < N) v = m[p.u[0] + row * uint(N) + uint(j)];
+        else if (p.u[5] != 0u) { int jj = j < 0 ? -j : 2 * (N - 1) - j; v = m[p.u[0] + row * uint(N) + uint(jj)]; }
+        else v = uintBitsToFloat(p.u[6]);
+        m[p.u[1] + id] = v;
+    } else if (p.mode == 2u) { // u: x_off, o_off, w_off, L, NF, HOP, NB, FR ; out [B, NB, FR, 2]
+        uint L = p.u[3], NF = p.u[4], HOP = p.u[5], NB = p.u[6], FR = p.u[7];
+        uint t = id % FR, f = (id / FR) % NB, b = id / (FR * NB); float re = 0.0, im = 0.0;
+        for (uint k = 0u; k < NF; k++) { float v = m[p.u[0] + b * L + t * HOP + k] * m[p.u[2] + k]; float a = TAU * float((f * k) % NF) / float(NF); re += v * cos(a); im -= v * sin(a); }
+        uint o = p.u[1] + id * 2u; m[o] = re; m[o + 1u] = im;
+    } else if (p.mode == 3u) { // u: x_off, o_off, w_off, NF, HOP, NB, FR, OUTL ; out [B, OUTL]
+        uint NF = p.u[3], HOP = p.u[4], NB = p.u[5], FR = p.u[6], OL = p.u[7];
+        uint i = id % OL, b = id / OL; uint j = i + NF / 2u; float y = 0.0, env = 0.0;
+        uint tlo = j >= NF ? (j - NF) / HOP + 1u : 0u; uint thi = min(FR - 1u, j / HOP);
+        for (uint t = tlo; t <= thi; t++) { uint n = j - t * HOP; if (n >= NF) continue; float s = 0.0;
+            for (uint f = 0u; f < NB; f++) { uint xo = p.u[0] + ((b * NB + f) * FR + t) * 2u; float re = m[xo], im = m[xo + 1u]; float a = TAU * float((f * n) % NF) / float(NF);
+                bool edge = f == 0u || ((NF & 1u) == 0u && f == NF / 2u); s += edge ? re * cos(a) : 2.0 * (re * cos(a) - im * sin(a)); }
+            float w = m[p.u[2] + n]; y += s / float(NF) * w; env += w * w; }
+        m[p.u[1] + id] = y / (env > 1e-11 ? env : 1.0);
+    } else if (p.mode == 11u) { // snake: x + c[ch] * sin(x * a[ch])^2, x contiguous [B, C, L]; u: x_off, a_off, c_off, o_off, C, L
+        uint ch = (id / p.u[5]) % p.u[4]; float x = m[p.u[0] + id];
+        precise float xa = x * m[p.u[1] + ch]; precise float sn = sin(xa); precise float s2 = sn * sn; precise float cs = m[p.u[2] + ch] * s2; precise float y = x + cs;
+        m[p.u[3] + id] = y;
+    } else if (p.mode == 9u) { // pack f32 -> f16 pairs: u: x_off, o_word_off
+        m[p.u[1] + id] = uintBitsToFloat(packFloat2x16(f16vec2(float16_t(m[p.u[0] + 2u * id]), float16_t(m[p.u[0] + 2u * id + 1u]))));
+    } else if (p.mode == 4u) { // embedding u: w_off, idx_off, D, o_off
+        uint D = p.u[2]; m[p.u[3] + id] = m[p.u[0] + uint(m[p.u[1] + id / D]) * D + id % D];
+    } else if (p.mode == 5u) { // upsample_nearest1d rows u: x_off, o_off, L, LO, sc(bits)
+        uint L = p.u[2], LO = p.u[3]; uint r = id / LO, i = id % LO; precise float f = float(i) * uintBitsToFloat(p.u[4]);
+        m[p.u[1] + id] = m[p.u[0] + r * L + min(uint(floor(f)), L - 1u)];
+    } else if (p.mode == 6u) { // row sum (sequential) u: x_off, o_off, N
+        uint N = p.u[2]; float a = 0.0; for (uint j = 0u; j < N; j++) a += m[p.u[0] + id * N + j]; m[p.u[1] + id] = a;
+    } else if (p.mode == 7u) { // cumsum pass 1: per (row, 256-chunk) local scan; u: x_off, o_off, N, NC, tmp_off
+        uint N = p.u[2], NC = p.u[3]; uint r = id / NC, c = id % NC; uint b = r * N, j0 = c * 256u, j1 = min(j0 + 256u, N); float a = 0.0;
+        for (uint j = j0; j < j1; j++) { a += m[p.u[0] + b + j]; m[p.u[1] + b + j] = a; } m[p.u[4] + id] = a;
+    } else if (p.mode == 8u) { // cumsum pass 2: add sum of previous chunks
+        uint N = p.u[2], NC = p.u[3]; uint r = id / NC, c = id % NC; uint b = r * N, j0 = c * 256u, j1 = min(j0 + 256u, N); float a = 0.0;
+        for (uint k = 0u; k < c; k++) a += m[p.u[4] + r * NC + k];
+        if (c > 0u) for (uint j = j0; j < j1; j++) m[p.u[1] + b + j] += a;
+    }
+}

@@ -1,0 +1,36 @@
+#version 450
+// gpt-oss MoE down (MXFP4) + bias, routing-weighted sum over the k experts, accumulated into the residual x.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 256) in;
+#ifndef LPR
+#define LPR 16u
+#endif
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 1) readonly buffer X { vec4 x4[]; };
+layout(std430, binding = 2) buffer Y { float y[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(std430, binding = 4) readonly buffer AU { uint au[]; };
+layout(std430, binding = 4) readonly buffer AF { float af[]; };
+layout(push_constant) uniform PC { uint woff; uint estride; uint N; uint K; uint bb; uint top_k; } pc;
+uint g_xo = 0u;
+vec4 XV4(uint i) { return x4[(g_xo + i) >> 2]; }
+#include "mxfp4.glsl"
+void main() {
+    uint col = gl_WorkGroupID.y;
+    uint rpw = gl_SubgroupSize / LPR, lane = gl_SubgroupInvocationID % LPR;
+    uint r = (gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID) * rpw + gl_SubgroupInvocationID / LPR;
+    bool valid = r < pc.N;
+    uint nb = pc.K / 32u, rb = nb * 17u;
+    float acc = 0.0;
+    for (uint s = 0u; s < pc.top_k; s++) {
+        uint e = au[440u + 16u * col + s]; g_xo = (col * pc.top_k + s) * pc.K;
+        float t = 0.0;
+        if (valid) for (uint b = lane; b < nb; b += LPR) t += mx_dot(pc.woff + e * pc.estride + r * rb + b * 17u, b * 32u);
+        t = subgroupClusteredAdd(t, LPR);
+        if (valid) acc += af[448u + 16u * col + s] * (t + f32w[pc.bb + e * pc.N + r]);
+    }
+    if (valid && lane == 0u) y[col * pc.N + r] += acc;
+}

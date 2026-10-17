@@ -1,0 +1,33 @@
+#version 450
+// Wan VAE mid-block attention, single head, per frame: one 256-lane workgroup per (frame f, query pixel i).
+// QKV f32 [p][3C] (bias not yet added; bias at P[b_off + 0..3C)), Np pixels per frame (<= 2048), C <= 1024.
+// O f16 [p][C] = softmax(q k^T / sqrt(C)) v.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer QKV { float t[]; };
+layout(std430, binding = 1) writeonly buffer O { float16_t o[]; };
+layout(std430, binding = 2) readonly buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint Np; uint C; uint b_off; float scale; } pc;
+shared float qs[1024]; shared float sc[2048]; shared float red[16];
+void main() {
+    uint wg = gl_WorkGroupID.x, f = wg / pc.Np, l = gl_LocalInvocationID.x, C3 = 3u * pc.C, base = f * pc.Np;
+    uint qrow = (base + wg % pc.Np) * C3;
+    for (uint c = l; c < pc.C; c += 256u) qs[c] = t[qrow + c] + pr[pc.b_off + c];
+    barrier();
+    float mx = -3.0e38;
+    for (uint j = l; j < pc.Np; j += 256u) { uint kr = (base + j) * C3 + pc.C; float s = 0.0;
+        for (uint c = 0u; c < pc.C; c++) s += qs[c] * (t[kr + c] + pr[pc.b_off + pc.C + c]);
+        s *= pc.scale; sc[j] = s; mx = max(mx, s); }
+    mx = subgroupMax(mx); if (subgroupElect()) red[gl_SubgroupID] = mx; barrier();
+    mx = red[0]; for (uint i = 1u; i < gl_NumSubgroups; i++) mx = max(mx, red[i]); barrier();
+    float sum = 0.0; for (uint j = l; j < pc.Np; j += 256u) { float e = exp(sc[j] - mx); sc[j] = e; sum += e; }
+    barrier();
+    sum = subgroupAdd(sum); if (subgroupElect()) red[gl_SubgroupID] = sum; barrier();
+    sum = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) sum += red[i];
+    for (uint c = l; c < pc.C; c += 256u) { float acc = 0.0; float bv = pr[pc.b_off + 2u * pc.C + c];
+        for (uint j = 0u; j < pc.Np; j++) acc += sc[j] * (t[(base + j) * C3 + 2u * pc.C + c] + bv);
+        o[(base + wg % pc.Np) * pc.C + c] = float16_t(acc / sum); }
+}

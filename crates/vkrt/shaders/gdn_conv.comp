@@ -1,0 +1,32 @@
+#version 450
+// Gated DeltaNet decode: causal conv1d (kernel KS<=4, taps w[c*KS+k], oldest first) + SiLU over the mixed q|k|v
+// channels, state shift, then per-head L2 norm of q and k (q also scaled by 1/sqrt(Dk)). One workgroup per head
+// (Dk = Dv = 128 channels): wg < nk -> q head, < 2nk -> k head, else v head.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer IN { float mix[]; };
+layout(std430, binding = 1) buffer ST { float st[]; };
+layout(std430, binding = 2) writeonly buffer OUT { float o[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint nk; uint st_off; uint w_off; uint ks; float eps; uint in_off; uint out_off; } pc;
+shared float red[4];
+void main() {
+    uint h = gl_WorkGroupID.x, i = gl_LocalInvocationID.x, c = h * 128u + i;
+    float xc = mix[pc.in_off + c];
+    uint so = pc.st_off + c * (pc.ks - 1u), wo = pc.w_off + c * pc.ks;
+    float acc = f32w[wo + pc.ks - 1u] * xc;
+    for (uint k = 0u; k + 1u < pc.ks; k++) acc += f32w[wo + k] * st[so + k];
+    for (uint k = 0u; k + 2u < pc.ks; k++) st[so + k] = st[so + k + 1u];
+    st[so + pc.ks - 2u] = xc;
+    float v = acc / (1.0 + exp(-acc));
+    if (h < 2u * pc.nk) {
+        float ss = subgroupAdd(v * v);
+        if (subgroupElect()) red[gl_SubgroupID] = ss;
+        barrier();
+        float tot = 0.0; for (uint s = 0u; s < gl_NumSubgroups; s++) tot += red[s];
+        v *= inversesqrt(tot + pc.eps);
+        if (h < pc.nk) v *= inversesqrt(128.0);
+    }
+    o[pc.out_off + c] = v;
+}

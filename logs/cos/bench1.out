@@ -1,0 +1,28 @@
+19:08:56 quiet
+== ours run 1
+prefix gpu 385.6 + 219.5 ms
+denoise 8 steps: gpu 6.71s wall 9.38s
+PHASE denoise 1792091450.162 1792091457.371
+vae decode gpu 0.96s wall 1.04s (load+decode 2.63s)
+video vs golden pipeline [9, 256, 256, 3]: PSNR 23.64 dB cos 0.990337 rel 1.387e-1 max|d| 0.8316 (n 1769472 vs 1769472)
+prefix         1.13 s  socket      52.9 J (  46.7 W)  gfx     11.9 J  cpu    13.9 J
+denoise        7.21 s  socket     498.0 J (  69.1 W)  gfx    190.6 J  cpu    16.2 J
+vae            2.63 s  socket     142.7 J (  54.3 W)  gfx     40.5 J  cpu    20.0 J
+total         10.97 s  socket     693.7 J
+== ours run 2
+prefix gpu 379.0 + 219.3 ms
+denoise 8 steps: gpu 6.71s wall 8.67s
+PHASE denoise 1792091463.768 1792091470.941
+vae decode gpu 0.97s wall 1.05s (load+decode 2.58s)
+video vs golden pipeline [9, 256, 256, 3]: PSNR 23.64 dB cos 0.990337 rel 1.387e-1 max|d| 0.8316 (n 1769472 vs 1769472)
+prefix         1.13 s  socket      40.8 J (  36.2 W)  gfx     11.4 J  cpu     4.5 J
+denoise        7.17 s  socket     503.4 J (  70.2 W)  gfx    191.2 J  cpu    14.9 J
+vae            2.58 s  socket     140.6 J (  54.5 W)  gfx     41.4 J  cpu    18.2 J
+total         10.88 s  socket     684.8 J
+== diffusers
+PHASE denoise 1792091486.662 1792091496.314
+PHASE vae 1792091496.696 1792091505.011
+denoise 9.6514892578125 vae 8.315514326095581 vae_dev cpu (1, 3, 9, 256, 256)
+denoise        9.65 s  socket     813.7 J (  84.3 W)  gfx    203.4 J  cpu   172.2 J
+vae            8.31 s  socket     878.0 J ( 105.6 W)  gfx     17.4 J  cpu   771.7 J
+total         17.97 s  socket    1691.7 J

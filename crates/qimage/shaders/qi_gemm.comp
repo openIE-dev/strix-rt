@@ -1,0 +1,62 @@
+#version 450
+// Dense GEMM for the DiT: Y[m][y_col + n] (=|+=) sum_k A[m][k] * W[n][k], A f16 (row stride lda), W BF16 rows of K
+// (8-byte aligned, uvec2 index w_off), Y f32. KHR cooperative matrix 16x16x16 f16 -> f32.
+// Tile 128 x 128 x BK 32, 8 wave32 (4 along M x 2 along N, 32 x 64 each = 2 x 4 accumulators), shared double buffer with
+// register prefetch of the next K slab. Requires M % 128 == 0, N % 128 == 0, K % 32 == 0.
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer A4 { uvec4 a4[]; };
+layout(std430, binding = 1) readonly buffer W2 { uvec2 w2[]; };
+layout(std430, binding = 2) buffer Y { float y[]; };
+layout(push_constant) uniform PC { uint M; uint N; uint K; uint w_off; uint lda; uint ldy; uint y_col; uint acc; } pc;
+const uint BM = 128u, BN = 128u, BK = 32u, ST = 5u;   // shared row stride in uvec4 (40 halves: 32 + 8 pad)
+shared uvec4 As[2][BM * ST]; shared uvec4 Bs[2][BN * ST];
+#define CA coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA>
+#define CB coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>
+#define CC coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>
+uint bf2h(uint u) {   // two packed bf16 -> two packed f16
+    return packFloat2x16(f16vec2(uintBitsToFloat(u << 16), uintBitsToFloat(u & 0xFFFF0000u)));
+}
+void main() {
+    const uint nt = pc.N / BN, tm = gl_WorkGroupID.x / nt, tn = gl_WorkGroupID.x % nt, t = gl_LocalInvocationID.x;
+    const uint sg = gl_SubgroupID, wm = sg >> 1u, wn = sg & 1u;
+    // loader mapping: A: 128 rows x 4 uvec4 -> 2 per thread; W: 128 rows x 8 uvec2 -> 4 per thread
+    uvec4 ra[2]; uvec2 rw[4];
+    const uint m0 = tm * BM, n0 = tn * BN;
+    CC acc[2][4];
+    [[unroll]] for (uint i = 0u; i < 2u; i++) [[unroll]] for (uint j = 0u; j < 4u; j++) acc[i][j] = CC(0.0);
+    // W loads: thread handles row r = t >> 1, uvec2 columns (t & 1) * 4 .. +4  (one row's 16 bf16 contiguous)
+    const uint wr = t >> 1u, wc = (t & 1u) * 4u;
+    uint kb = 0u, buf = 0u;
+    [[unroll]] for (uint i = 0u; i < 2u; i++) { uint e = t + i * 256u, r = e >> 2u, c = e & 3u; ra[i] = a4[((m0 + r) * pc.lda) / 8u + c]; }
+    [[unroll]] for (uint i = 0u; i < 4u; i++) rw[i] = w2[pc.w_off + ((n0 + wr) * pc.K) / 4u + wc + i];
+    for (;;) {
+        [[unroll]] for (uint i = 0u; i < 2u; i++) { uint e = t + i * 256u, r = e >> 2u, c = e & 3u; As[buf][r * ST + c] = ra[i]; }
+        Bs[buf][wr * ST + (wc >> 1u)] = uvec4(bf2h(rw[0].x), bf2h(rw[0].y), bf2h(rw[1].x), bf2h(rw[1].y));
+        Bs[buf][wr * ST + (wc >> 1u) + 1u] = uvec4(bf2h(rw[2].x), bf2h(rw[2].y), bf2h(rw[3].x), bf2h(rw[3].y));
+        barrier();
+        uint kn = kb + BK;
+        if (kn < pc.K) {
+            [[unroll]] for (uint i = 0u; i < 2u; i++) { uint e = t + i * 256u, r = e >> 2u, c = e & 3u; ra[i] = a4[((m0 + r) * pc.lda + kn) / 8u + c]; }
+            [[unroll]] for (uint i = 0u; i < 4u; i++) rw[i] = w2[pc.w_off + ((n0 + wr) * pc.K + kn) / 4u + wc + i];
+        }
+        [[unroll]] for (uint kk = 0u; kk < 2u; kk++) {
+            CA fa[2]; CB fb[4];
+            [[unroll]] for (uint i = 0u; i < 2u; i++) coopMatLoad(fa[i], As[buf], (wm * 32u + i * 16u) * ST + kk * 2u, ST, gl_CooperativeMatrixLayoutRowMajor);
+            [[unroll]] for (uint j = 0u; j < 4u; j++) coopMatLoad(fb[j], Bs[buf], (wn * 64u + j * 16u) * ST + kk * 2u, ST, gl_CooperativeMatrixLayoutColumnMajor);
+            [[unroll]] for (uint i = 0u; i < 2u; i++) [[unroll]] for (uint j = 0u; j < 4u; j++) acc[i][j] = coopMatMulAdd(fa[i], fb[j], acc[i][j]);
+        }
+        kb = kn; if (kb >= pc.K) break;
+        buf ^= 1u;
+    }
+    [[unroll]] for (uint i = 0u; i < 2u; i++) [[unroll]] for (uint j = 0u; j < 4u; j++) {
+        uint o = (m0 + wm * 32u + i * 16u) * pc.ldy + pc.y_col + n0 + wn * 64u + j * 16u;
+        if (pc.acc != 0u) { CC c; coopMatLoad(c, y, o, pc.ldy, gl_CooperativeMatrixLayoutRowMajor); acc[i][j] = acc[i][j] + c; }
+        coopMatStore(acc[i][j], y, o, pc.ldy, gl_CooperativeMatrixLayoutRowMajor);
+    }
+}

@@ -1,0 +1,29 @@
+64 token ids identical copied vs dmabuf
+== cold, ZEROCOPY=dmabuf with warm (MADV_HUGEPAGE+POPULATE_READ)
+warm: 3072/1143329 pages were resident; MADV_POPULATE_READ ret 0 in 0.651s
+weights imported zero-copy in 0.661s
+load 0.76s, gemv ls=64 sg=32
+decode: 128 tok in 2.802s wall = 45.68 tok/s; GPU-only 21.30 ms/tok = 46.96 tok/s
+process wall 3.85s
+$MODELS/q7.gguf: 1143329 pages; 2MiB-aligned contiguous chunks: 2223/2233 (99.6%)
+== cold, ZEROCOPY=dmabuf, ZC_WARM=0 (GUP faults pages in)
+weights imported zero-copy in 0.610s
+load 0.70s, gemv ls=64 sg=32
+decode: 128 tok in 2.913s wall = 43.94 tok/s; GPU-only 21.35 ms/tok = 46.84 tok/s
+$MODELS/q7.gguf: 1143329 pages; 2MiB-aligned contiguous chunks: 2156/2233 (96.6%)
+== cold, copied
+weights copied in 0.942s
+load 1.04s, gemv ls=64 sg=32
+decode: 128 tok in 2.896s wall = 44.20 tok/s; GPU-only 21.37 ms/tok = 46.80 tok/s
+process wall 4.27s
+== kbench ZEROCOPY=dmabuf
+ tensor | type | N x K | GB/s | % of 256 | max_abs 
+ attn_q.weight | Q4K | 3584 x 3584 | 176.2 | 68.8% | 1.79e-6 
+ attn_output.weight | Q4K | 3584 x 3584 | 178.4 | 69.7% | 5.96e-7 
+ attn_k.weight | Q4K | 512 x 3584 | 187.4 | 73.2% | 1.07e-6 
+ attn_v.weight | Q6K | 512 x 3584 | 267.4 | 104.4% | 1.19e-7 
+ ffn_gate.weight | Q4K | 18944 x 3584 | 180.9 | 70.7% | 8.49e-7 
+ ffn_gate.weight+up (swiglu) | Q4K | 18944 x 3584 | 226.6 | 88.5% | 9.54e-7 
+ ffn_down.weight | Q4K | 3584 x 18944 | 184.9 | 72.2% | 1.91e-6 
+ ffn_down.weight | Q6K | 3584 x 18944 | 218.0 | 85.2% | 2.38e-7 
+ output.weight | Q6K | 152064 x 3584 | 231.3 | 90.4% | 3.58e-7 

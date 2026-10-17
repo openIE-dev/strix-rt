@@ -1,0 +1,21 @@
+#version 450
+// 2x2 spatial merge of a row-major grid X [Hp][Wp][C]: CAT [(Hp/2)(Wp/2)][4C] = [p00 | p01 | p10 | p11];
+// flags 1: also MEAN [..][C] = (p00 + p01 + p10 + p11) / 4. One thread per CAT element.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer CT { float cat[]; };
+layout(std430, binding = 2) writeonly buffer MN { float mean[]; };
+layout(push_constant) uniform PC { uint Hp; uint Wp; uint C; uint flags; } pc;
+void main() {
+    uint g = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u;
+    uint w2 = pc.Wp / 2u, no = (pc.Hp / 2u) * w2, C4 = 4u * pc.C;
+    if (g >= no * C4) return;
+    uint o = g / C4, f = g - o * C4, q = f / pc.C, c = f - q * pc.C;
+    uint i = o / w2, j = o - i * w2;
+    uint src = (2u * i + (q >> 1)) * pc.Wp + 2u * j + (q & 1u);
+    cat[g] = x[src * pc.C + c];
+    if ((pc.flags & 1u) != 0u && q == 0u) {
+        uint b = (2u * i) * pc.Wp + 2u * j;
+        mean[o * pc.C + c] = 0.25 * (x[b * pc.C + c] + x[(b + 1u) * pc.C + c] + x[(b + pc.Wp) * pc.C + c] + x[(b + pc.Wp + 1u) * pc.C + c]);
+    }
+}

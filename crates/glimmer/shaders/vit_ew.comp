@@ -1,0 +1,33 @@
+#version 450
+// Glimmer ViT elementwise (workgroup y = row t):
+//   mode 0: x[t*K+i] += y[t*K+i] + bias[b_off+i]                                    (attention / FFN residual with output bias)
+//   mode 1: A[t*lda+i] = f16(gelu_erf(y[t*ycs+i] + (b_off != NONE ? bias[b_off+i] : 0)))
+//   mode 2: A[t*lda + i] = f16(x[idx[t/4 *... ]]) pixel-shuffle gather: A[o*lda + c*4+s] = f16(x[idx[o*4+s]*K + c])  (K = 1536)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Y { float y[]; };
+layout(std430, binding = 2) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(std430, binding = 4) readonly buffer I { uint idx[]; };
+layout(push_constant) uniform PC { uint K; uint mode; uint b_off; uint ycs; uint lda; } pc;
+float erf_(float v) {
+    float s = sign(v), z = abs(v);
+    float t = 1.0 / (1.0 + 0.3275911 * z);
+    float p = ((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592;
+    return s * (1.0 - p * t * exp(-z * z));
+}
+void main() {
+    uint i = gl_GlobalInvocationID.x, t = gl_WorkGroupID.y;
+    if (pc.mode == 2u) {   // K = channels (1536); 4 spatial slots per output row
+        if (i >= pc.K * 4u) return;
+        uint c = i / 4u, s = i % 4u;
+        a[t * pc.lda + i] = float16_t(x[idx[t * 4u + s] * pc.K + c]);
+        return;
+    }
+    if (i >= pc.K) return;
+    if (pc.mode == 0u) { x[t * pc.K + i] += y[t * pc.K + i] + f32w[pc.b_off + i]; return; }
+    float v = y[t * pc.ycs + i] + (pc.b_off != 0xFFFFFFFFu ? f32w[pc.b_off + i] : 0.0);
+    a[t * pc.lda + i] = float16_t(0.5 * v * (1.0 + erf_(v * 0.7071067811865476)));
+}

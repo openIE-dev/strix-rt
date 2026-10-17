@@ -1,0 +1,25 @@
+#version 450
+// q|k|v (f32 [n][ldy], cols 0 / dm / 2dm, head dim hd) -> f16 [n][H*128] each, head dims zero-padded to 128 for qimage flash.
+// mode 1 (unpad): O16 f16 [n][H*128] -> A16 f16 [n][H*hd].
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Y { float y[]; };
+layout(std430, binding = 1) buffer Q { float16_t q[]; };
+layout(std430, binding = 2) buffer K { float16_t k[]; };
+layout(std430, binding = 3) buffer V { float16_t v[]; };
+layout(push_constant) uniform PC { uint mode; uint n; uint H; uint hd; uint ldy; } pc;
+void main() {
+    uint g = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u;
+    uint dm = pc.H * pc.hd, W = pc.H * 128u;
+    if (pc.mode == 0u) {
+        if (g >= pc.n * W) return;
+        uint r = g / W, c = g - r * W, h = c / 128u, i = c - h * 128u;
+        bool in_ = i < pc.hd; uint s = r * pc.ldy + h * pc.hd + i;
+        q[g] = float16_t(in_ ? y[s] : 0.0); k[g] = float16_t(in_ ? y[s + dm] : 0.0); v[g] = float16_t(in_ ? y[s + 2u * dm] : 0.0);
+    } else {
+        if (g >= pc.n * dm) return;
+        uint r = g / dm, c = g - r * dm, h = c / pc.hd, i = c - h * pc.hd;
+        k[g] = q[r * W + h * 128u + i];   // binding 1 = O16 (flash output), binding 2 = A16
+    }
+}

@@ -1,0 +1,33 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+// Bidirectional attention, head dim 64, one workgroup (4 x 64-lane subgroups) per (query i, head h); L <= 1024.
+// q/k/v = QKV[row][{0,D,2D} + h*64 + d] (+ bias f[b_off + ...]); RoPE is applied beforehand (ly_rope).
+// window w > 0: keys with |i - j| <= w only. Lane d of subgroup g scores keys j = g, g+4, ... (coalesced 64-float rows).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Q { float qkv[]; };
+layout(std430, binding = 1) writeonly buffer O { float16_t o[]; };
+layout(std430, binding = 2) readonly buffer F { float f[]; };
+layout(push_constant) uniform PC { uint L; uint D; uint ldo; uint b_off; float theta; uint win; uint nh; } pc;
+shared float sc[1024]; shared float red[256]; shared float acc[256];
+void main() {
+    uint i = gl_WorkGroupID.x / pc.nh, h = gl_WorkGroupID.x % pc.nh, l = gl_LocalInvocationID.x, d = l & 63u, g = l >> 6;
+    bool bias = pc.b_off != 0xffffffffu; uint ld = 3u * pc.D;
+    float q = qkv[i * ld + h * 64u + d] + (bias ? f[pc.b_off + h * 64u + d] : 0.0);
+    float kb = bias ? f[pc.b_off + pc.D + h * 64u + d] : 0.0, vb = bias ? f[pc.b_off + 2u * pc.D + h * 64u + d] : 0.0;
+    uint j0 = pc.win == 0u ? 0u : (i > pc.win ? i - pc.win : 0u), j1 = pc.win == 0u ? pc.L : min(pc.L, i + pc.win + 1u);
+    float mx = -1e30;
+    for (uint j = j0 + g; j < j1; j += 4u) {
+        float s = subgroupAdd(q * (qkv[j * ld + pc.D + h * 64u + d] + kb)) * 0.125;
+        if (d == 0u) sc[j] = s; mx = max(mx, s);
+    }
+    red[l] = mx; barrier(); for (uint o2 = 128u; o2 > 0u; o2 >>= 1) { if (l < o2) red[l] = max(red[l], red[l + o2]); barrier(); }
+    mx = red[0]; barrier();
+    float sum = 0.0; for (uint j = j0 + l; j < j1; j += 256u) { float e = exp(sc[j] - mx); sc[j] = e; sum += e; }
+    red[l] = sum; barrier(); for (uint o2 = 128u; o2 > 0u; o2 >>= 1) { if (l < o2) red[l] += red[l + o2]; barrier(); }
+    float inv = 1.0 / red[0]; float a = 0.0;
+    for (uint j = j0 + g; j < j1; j += 4u) a += sc[j] * (qkv[j * ld + 2u * pc.D + h * 64u + d] + vb);
+    acc[l] = a; barrier();
+    if (l < 64u) o[i * pc.ldo + h * 64u + l] = float16_t((acc[l] + acc[l + 64u] + acc[l + 128u] + acc[l + 192u]) * inv);
+}

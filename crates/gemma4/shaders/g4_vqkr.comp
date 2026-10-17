@@ -1,0 +1,36 @@
+#version 450
+// Gemma 4 vision q/k/v prep, workgroup (head h, token t), D = 64 (one lane per dim):
+// q, k: rms * w then 2D NeoX RoPE (dims [0,32): pos_x, [32,64): pos_y; pairs (j, j+16) in each half, theta base);
+// v: rms without weight. q in place (pr row t, cols [0,E)); k, v -> f16 kc/vc [t][E] (E = n_head * 64).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Q { float pr[]; };
+layout(std430, binding = 1) writeonly buffer KC { float16_t kc[]; };
+layout(std430, binding = 2) writeonly buffer VC { float16_t vc[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint n_head; uint ldp; uint qn_off; uint kn_off; float theta; float eps; uint ncols; } pc;
+shared float xs[64];
+shared float red[2];
+float rsum(float v) { v = subgroupAdd(v); barrier(); if (subgroupElect()) red[gl_SubgroupID] = v; barrier(); float s = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) s += red[i]; barrier(); return s; }
+void main() {
+    uint h = gl_WorkGroupID.x, t = gl_WorkGroupID.y, i = gl_LocalInvocationID.x, E = pc.n_head * 64u;
+    uint px = t % pc.ncols, py = t / pc.ncols;
+    for (uint w = 0u; w < 3u; w++) {
+        uint o = t * pc.ldp + w * E + h * 64u;
+        float v = pr[o + i];
+        float sc = inversesqrt(rsum(v * v) / 64.0 + pc.eps);
+        if (w == 2u) { vc[t * E + h * 64u + i] = float16_t(v * sc); continue; }
+        xs[i] = v * sc * f32w[(w == 0u ? pc.qn_off : pc.kn_off) + i];
+        barrier();
+        uint half_ = i / 32u, j = i % 16u, b = half_ * 32u;
+        float pos = float(half_ == 0u ? px : py);
+        float th = pos * pow(pc.theta, -float(2u * j) / 32.0), c = cos(th), s = sin(th);
+        float x0 = xs[b + j], x1 = xs[b + j + 16u];
+        float r = (i % 32u) < 16u ? x0 * c - x1 * s : x0 * s + x1 * c;
+        barrier();
+        if (w == 0u) pr[o + i] = r; else kc[t * E + h * 64u + i] = float16_t(r);
+    }
+}

@@ -1,0 +1,28 @@
+host import ext: true, mode shared_ro
+imported 28 tensors, 1019.8 MiB in 0.198s (5.40 GB/s), memory flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED
+copied into DL|HV buffers in 0.129s
+imported vs copied result max |diff| = 0e0
+empty submit+wait (with imports/copies alive): 1168.4 us
+GEMV imported(mmap): 18944x3584 Q4_K, 228.8 us/call, 167.3 GB/s (65.4% of 256), cycling 28 tensors
+GEMV copied: 18944x3584 Q4_K, 190.0 us/call, 201.5 GB/s (78.7% of 256), cycling 28 tensors
+empty submit+wait (imports freed, copies alive): 23.2 us
+
+
+@cs_n: 410
+@cs_tot_us: 231030
+@cs_us:
+[4, 8)               190 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@     |
+[8, 16)                8 |@                                                   |
+[16, 32)               1 |                                                    |
+[32, 64)               1 |                                                    |
+[64, 128)              0 |                                                    |
+[128, 256)             0 |                                                    |
+[256, 512)             0 |                                                    |
+[512, 1K)              0 |                                                    |
+[1K, 2K)             210 |@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|
+
+@get_user_pages_tot_us: 390358
+@gup_n: 5908
+@hmm_n: 5908
+@hmm_range_fault_tot_us: 379650
+@parser_bos_tot_us: 226497

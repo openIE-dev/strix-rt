@@ -1,0 +1,25 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+// Gated RMSNorm per (token, value head): A = f16(o * rsqrt(mean(o^2)+eps) * nw * silu(z)).
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer O { float o[]; };
+layout(std430, binding = 1) readonly buffer PR { float pr[]; };
+layout(std430, binding = 2) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint nv; uint ldp; uint z_off; uint nw_off; float eps; uint lda; } pc;
+shared float red[4];
+void main() {
+    uint g = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint h = g % pc.nv, t = g / pc.nv, i = gl_LocalInvocationID.x;
+    float v = o[t * pc.nv * 128u + h * 128u + i];
+    float ss = subgroupAdd(v * v);
+    if (subgroupElect()) red[gl_SubgroupID] = ss;
+    barrier();
+    float tot = 0.0; for (uint s = 0u; s < gl_NumSubgroups; s++) tot += red[s];
+    float z = pr[t * pc.ldp + pc.z_off + h * 128u + i];
+    a[t * pc.lda + h * 128u + i] = float16_t(v * inversesqrt(tot / 128.0 + pc.eps) * f32w[pc.nw_off + i] * (z / (1.0 + exp(-z))));
+}

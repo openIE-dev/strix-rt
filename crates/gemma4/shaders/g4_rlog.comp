@@ -1,0 +1,39 @@
+#version 450
+// Gemma 4 MoE router logits, spread over workgroups: one subgroup per expert, workgroup (x = expert block, y = column).
+// lg[col * 128 + e] = W_e . (rms(x) / sqrt(K) * s). Feeds g4_router (pre = 1), which only does top-k + softmax.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const uint TB = 1u;   // columns per workgroup (workgroup y = column block): each expert row is read once for TB columns, same per-column summation order
+layout(constant_id = 1) const uint KM = 4096u;   // >= K (shared floats per column)
+layout(std430, binding = 0) readonly buffer F { float f32w[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) writeonly buffer L { float lg[]; };
+layout(push_constant) uniform PC { uint w_off; uint s_off; uint K; uint n_exp; float eps; uint x_cs; uint m; } pc;
+shared float red[TB][8];
+shared float xs[TB * KM];
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    for (uint b = 0u; b < TB; b++) {
+        const uint col = min(gl_WorkGroupID.y * TB + b, pc.m - 1u), xo = col * pc.x_cs;
+        float ss = 0.0;
+        for (uint i = t; i < pc.K; i += 256u) { float v = x[xo + i]; ss += v * v; }
+        ss = subgroupAdd(ss);
+        if (subgroupElect()) red[b][gl_SubgroupID] = ss;
+    }
+    barrier();
+    for (uint b = 0u; b < TB; b++) {
+        const uint col = min(gl_WorkGroupID.y * TB + b, pc.m - 1u), xo = col * pc.x_cs;
+        float tot = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) tot += red[b][i];
+        float sc = inversesqrt(tot / float(pc.K) + pc.eps) * inversesqrt(float(pc.K));
+        for (uint i = t; i < pc.K; i += 256u) xs[b * KM + i] = x[xo + i] * sc * f32w[pc.s_off + i];
+    }
+    barrier();
+    uint e = gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID;
+    if (e >= pc.n_exp) return;
+    float s[TB];
+    for (uint b = 0u; b < TB; b++) s[b] = 0.0;
+    uint wo = pc.w_off + e * pc.K;
+    for (uint i = gl_SubgroupInvocationID; i < pc.K; i += gl_SubgroupSize) { const float w = f32w[wo + i]; for (uint b = 0u; b < TB; b++) s[b] += w * xs[b * KM + i]; }
+    for (uint b = 0u; b < TB; b++) { const float v = subgroupAdd(s[b]); const uint col = gl_WorkGroupID.y * TB + b; if (subgroupElect() && col < pc.m) lg[col * 128u + e] = v; }
+}

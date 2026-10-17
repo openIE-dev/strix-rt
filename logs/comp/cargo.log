@@ -1,0 +1,112 @@
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling libc v0.2.190
+   Compiling cfg-if v1.0.5
+   Compiling anyhow v1.0.104
+   Compiling zerocopy v0.8.63
+   Compiling ash v0.38.0+1.3.281
+   Compiling vkrt v0.1.0 (~/strix-rt/crates/vkrt)
+   Compiling ternary v0.1.0 (~/strix-rt/crates/ternary)
+   Compiling kitten v0.1.0 (~/strix-rt/crates/kitten)
+   Compiling npu v0.1.0 (~/strix-rt/crates/npu)
+   Compiling prefill v0.1.0 (~/strix-rt/crates/prefill)
+   Compiling zmij v1.0.23
+   Compiling serde_core v1.0.229
+   Compiling laya v0.1.0 (~/strix-rt/crates/laya)
+   Compiling serde_json v1.0.154
+   Compiling tinyvec v1.13.3
+   Compiling kev v0.1.0 (~/strix-rt/crates/kev)
+   Compiling qimage v0.1.0 (~/strix-rt/crates/qimage)
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.3
+   Compiling mcv v0.1.0 (~/strix-rt/crates/mcv)
+   Compiling libloading v0.8.9
+   Compiling unicode-normalization v0.1.25
+   Compiling syn v2.0.119
+   Compiling memmap2 v0.9.11
+   Compiling zerocopy-derive v0.8.63
+   Compiling half v2.7.1
+   Compiling gguf v0.1.0 (~/strix-rt/crates/gguf)
+   Compiling rtcore v0.1.0 (~/strix-rt/crates/rtcore)
+   Compiling qwen2 v0.1.0 (~/strix-rt/crates/qwen2)
+warning: unnecessary parentheses around `if` condition
+  --> crates/rtcore/src/lib.rs:77:32
+   |
+77 |             let (lpr, ls) = if (key.0 == 8 || key.0 == 9 || key.0 == 12) { self.tern } else { (self.lpr, self.ls) };
+   |                                ^                                       ^
+   |
+   = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+   |
+77 -             let (lpr, ls) = if (key.0 == 8 || key.0 == 9 || key.0 == 12) { self.tern } else { (self.lpr, self.ls) };
+77 +             let (lpr, ls) = if key.0 == 8 || key.0 == 9 || key.0 == 12 { self.tern } else { (self.lpr, self.ls) };
+   |
+
+   Compiling qwen38 v0.1.0 (~/strix-rt/crates/qwen38)
+   Compiling lfm2 v0.1.0 (~/strix-rt/crates/lfm2)
+warning: field `embed` is never read
+  --> crates/qwen38/src/lib.rs:20:5
+   |
+17 | pub struct Model {
+   |            ----- field in this struct
+...
+20 |     embed: Kernel, conv: Kernel, step_k: Kernel, rope: Kernel, attn: Kernel, comb: Kernel, argmax: Kernel, sample: Kernel, nc: u32,
+   |     ^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `rtcore` (lib) generated 1 warning (run `cargo fix --lib -p rtcore` to apply 1 suggestion)
+warning: field `pool` is never read
+  --> crates/kitten/src/arena.rs:15:36
+   |
+14 | pub struct Gpu {
+   |            --- field in this struct
+15 |     pub ctx: Ctx, pub buf: Buffer, pool: vk::CommandPool, cb: Cell<vk::CommandBuffer>, fence: vk::Fence, open: Cell<bool>,
+   |                                    ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `ldy` is never read
+  --> crates/prefill/src/lfm2moe.rs:14:74
+   |
+14 | pub struct Lf { pub mmax: u32, x: Buffer, a: Buffer, al: u32, y: Buffer, ldy: u32, ag: Buffer, yg: Buffer, hg: Buffer, yd: Buffer, r...
+   |            -- field in this struct                                       ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `expert` is never used
+  --> crates/prefill/src/lfm2moe.rs:40:4
+   |
+40 | fn expert(w: WRef, e: u32) -> WRef { let eb = w.bytes / w.e.max(1) as u64; WRef { off: w.off + e as u64 * eb, bytes: eb, e: 1, ..w } }
+   |    ^^^^^^
+
+warning: `qwen38` (lib) generated 1 warning
+warning: `prefill` (lib) generated 2 warnings
+warning: fields `ldp_max` and `a2` are never read
+  --> crates/mcv/src/prefill.rs:19:41
+   |
+18 | pub struct Prefill {
+   |            ------- fields in this struct
+19 |     pub pf: Pf, pub mmax: u32, al: u32, ldp_max: u32,
+   |                                         ^^^^^^^
+20 |     prope: Kernel, psel: Kernel, shadd: Kernel, gscan: Kernel, gscan_r: u32, gmv:...
+21 |     x: Buffer, a: Buffer, a2: Buffer, p: Buffer, cv: Buffer, o: Buffer, pos: Buffer,
+   |                           ^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `mcv` (lib) generated 1 warning
+warning: `kitten` (lib) generated 1 warning
+   Compiling bench v0.1.0 (~/strix-rt/crates/bench)
+warning: unused import: `GgmlType`
+ --> crates/bench/src/bin/memtype.rs:4:12
+  |
+4 | use gguf::{GgmlType, Gguf};
+  |            ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `bench` (bin "memtype") generated 1 warning (run `cargo fix --bin "memtype" -p bench` to apply 1 suggestion)
+    Finished `release` profile [optimized + debuginfo] target(s) in 41.64s
+RC 0

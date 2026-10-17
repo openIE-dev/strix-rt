@@ -1,0 +1,89 @@
+#version 450
+// Ternary x int8 GEMM for prompt processing (KHR cooperative matrix, s8 x s8 -> s32, 16x16x16).
+//   Y[m, n] = sum_g xs[m,g] * ws[n,g] * sum_{k in g} xq[m,k] * t[n,k]      (t in {-1,0,1})
+// WG = 4 subgroups x 32 lanes, tile 64 tokens (M) x 64 weight rows (N); each subgroup a 32x32 sub-tile.
+// Per 128-K group: decode the 64x128 ternary W tile to int8 in shared, 8 coop k-steps (A straight from
+// the int8 activation buffer), spill the s32 accumulators to shared and apply both scales in fp32.
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer W32 { uint w32[]; };
+layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
+layout(std430, binding = 1) readonly buffer XQ { int8_t xq[]; };
+layout(std430, binding = 2) readonly buffer XS { float xs[]; };
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+layout(push_constant) uniform PC { uint M; uint N; uint K; uint w_off; } pc;
+shared int8_t wt[64 * 128];     // [n][k]
+shared float wsc[64];
+shared int acc_s[4 * 32 * 32];
+void main() {
+    const uint NT = pc.N / 64u;
+    const uint id = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    const uint n0 = (id % NT) * 64u, m0 = (id / NT) * 64u;
+    const uint t = gl_LocalInvocationID.x, sg = gl_SubgroupID, lane = gl_SubgroupInvocationID;
+    const uint sm = (sg >> 1) * 32u, sn = (sg & 1u) * 32u;   // subgroup sub-tile origin
+    const uint K = pc.K, G = K / 128u;
+    float out_[32];
+    [[unroll]] for (uint i = 0u; i < 32u; i++) out_[i] = 0.0;
+    for (uint g = 0u; g < G; g++) {
+        // ---- decode W tile: thread t -> row n = t/2, half = t%2 ----
+        const uint n = t >> 1, hf = t & 1u;
+#if defined(PQ2)
+        {
+            const uint RB = K / 128u * 34u;
+            const uint h = (pc.w_off + (n0 + n) * RB + g * 34u) >> 1;
+            if (hf == 0u) wsc[n] = unpackHalf2x16(uint(w16[h])).x;
+            [[unroll]] for (uint i = 0u; i < 8u; i++) {            // 8 u16 = 64 elements
+                const uint v = uint(w16[h + 1u + hf * 8u + i]);
+                [[unroll]] for (uint e = 0u; e < 8u; e++) wt[n * 128u + hf * 64u + i * 8u + e] = int8_t(int((v >> (2u * e)) & 3u) - 1);
+            }
+        }
+#elif defined(PTQ1)
+        {
+            const uint RB = K / 128u * 28u;
+            const uint wb = (pc.w_off + (n0 + n) * RB + g * 28u) >> 2;
+            if (hf == 0u) {     // qs[0..16] -> elems n*16 + m
+                [[unroll]] for (uint wi = 0u; wi < 4u; wi++) {
+                    uvec4 q = (uvec4(w32[wb + wi]) >> uvec4(0, 8, 16, 24)) & 255u;
+                    [[unroll]] for (uint p = 0u; p < 5u; p++) { q *= 3u; uvec4 tt = q >> 8; q &= 255u;
+                        [[unroll]] for (uint c = 0u; c < 4u; c++) wt[n * 128u + p * 16u + wi * 4u + c] = int8_t(int(tt[c]) - 1); }
+                }
+            } else {            // qs[16..24] -> 80 + p*8 + m ; qh -> 120 + p*2 + h
+                [[unroll]] for (uint wi = 0u; wi < 2u; wi++) {
+                    uvec4 q = (uvec4(w32[wb + 4u + wi]) >> uvec4(0, 8, 16, 24)) & 255u;
+                    [[unroll]] for (uint p = 0u; p < 5u; p++) { q *= 3u; uvec4 tt = q >> 8; q &= 255u;
+                        [[unroll]] for (uint c = 0u; c < 4u; c++) wt[n * 128u + 80u + p * 8u + wi * 4u + c] = int8_t(int(tt[c]) - 1); }
+                }
+                const uint w6 = w32[wb + 6u];
+                uvec2 q = uvec2(w6, w6 >> 8) & 255u;
+                [[unroll]] for (uint p = 0u; p < 4u; p++) { q *= 3u; uvec2 tt = q >> 8; q &= 255u;
+                    wt[n * 128u + 120u + p * 2u] = int8_t(int(tt.x) - 1); wt[n * 128u + 121u + p * 2u] = int8_t(int(tt.y) - 1); }
+                wsc[n] = unpackHalf2x16(w6 >> 16).x;
+            }
+        }
+#endif
+        barrier();
+        coopmat<int, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> c[2][2];
+        [[unroll]] for (uint i = 0u; i < 2u; i++) [[unroll]] for (uint j = 0u; j < 2u; j++) c[i][j] = coopmat<int, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0);
+        [[unroll]] for (uint ks = 0u; ks < 8u; ks++) {
+            coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> a[2];
+            coopmat<int8_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> b[2];
+            [[unroll]] for (uint i = 0u; i < 2u; i++) coopMatLoad(a[i], xq, (m0 + sm + i * 16u) * K + g * 128u + ks * 16u, K, gl_CooperativeMatrixLayoutRowMajor);
+            [[unroll]] for (uint j = 0u; j < 2u; j++) coopMatLoad(b[j], wt, (sn + j * 16u) * 128u + ks * 16u, 128u, gl_CooperativeMatrixLayoutColumnMajor);
+            [[unroll]] for (uint i = 0u; i < 2u; i++) [[unroll]] for (uint j = 0u; j < 2u; j++) c[i][j] = coopMatMulAdd(a[i], b[j], c[i][j]);
+        }
+        [[unroll]] for (uint i = 0u; i < 2u; i++) [[unroll]] for (uint j = 0u; j < 2u; j++)
+            coopMatStore(c[i][j], acc_s, sg * 1024u + i * 16u * 32u + j * 16u, 32u, gl_CooperativeMatrixLayoutRowMajor);
+        barrier();
+        const float wl = wsc[sn + lane];
+        [[unroll]] for (uint i = 0u; i < 32u; i++) out_[i] += float(acc_s[sg * 1024u + i * 32u + lane]) * xs[(m0 + sm + i) * G + g] * wl;
+        barrier();
+    }
+    [[unroll]] for (uint i = 0u; i < 32u; i++) y[(m0 + sm + i) * pc.N + n0 + sn + lane] = out_[i];
+}

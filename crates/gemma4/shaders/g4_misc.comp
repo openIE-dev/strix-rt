@@ -1,0 +1,21 @@
+#version 450
+// Gemma 4 elementwise ops; workgroup y = token column (strides a_cs/b_cs/o_cs).
+//   mode 0 GeGLU:     o[i] = gelu_tanh(a[i]) * a[n + i]
+//   mode 1 PLE gate:  o[i] = gelu_tanh(a[i]) * b[b_off + i]
+//   mode 2 scale:     o[i] = a[i] * f
+//   mode 3 softcap:   o[i] = f * tanh(a[i] / f)
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer A { float a[]; };
+layout(std430, binding = 1) buffer B { float b[]; };
+layout(std430, binding = 2) buffer O { float o[]; };
+layout(push_constant) uniform PC { uint n; uint mode; uint b_off; float f; uint a_cs; uint b_cs; uint o_cs; } pc;
+float gelu(float x) { const float c = 0.7978845608028654; float u = clamp(c * (x + 0.044715 * x * x * x), -15.0, 15.0); return 0.5 * x * (1.0 + tanh(u)); }
+void main() {
+    uint i = gl_GlobalInvocationID.x, j = gl_WorkGroupID.y;
+    if (i >= pc.n) return;
+    uint ai = j * pc.a_cs + i, oi = j * pc.o_cs + i;
+    if (pc.mode == 0u) o[oi] = gelu(a[ai]) * a[ai + pc.n];
+    else if (pc.mode == 1u) o[oi] = gelu(a[ai]) * b[pc.b_off + j * pc.b_cs + i];
+    else if (pc.mode == 2u) o[oi] = a[ai] * pc.f;
+    else o[oi] = pc.f * tanh(clamp(a[ai] / pc.f, -15.0, 15.0));
+}

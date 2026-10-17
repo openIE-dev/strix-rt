@@ -1,0 +1,32 @@
+#version 450
+// Causal attention for short text sequences (text encoder, DiT text prefix): one workgroup (128 lanes = head dim)
+// per (query i, head h); key j <= i + koff. GQA: kv head = h / kvdiv. Q/K/V/O f16 with row strides.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer Q { float16_t q[]; };
+layout(std430, binding = 1) readonly buffer K { float16_t k[]; };
+layout(std430, binding = 2) readonly buffer V { float16_t v[]; };
+layout(std430, binding = 3) writeonly buffer O { float16_t o[]; };
+layout(push_constant) uniform PC { uint L; uint H; uint kvdiv; uint ldq; uint ldk; uint ldv; uint ldo; float scale; } pc;
+const uint MAXK = 2048u;
+shared float sc[MAXK]; shared float qs[128]; shared float red[8];
+void main() {
+    uint i = gl_WorkGroupID.x / pc.H, h = gl_WorkGroupID.x % pc.H, d = gl_LocalInvocationID.x, kh = h / pc.kvdiv;
+    qs[d] = float(q[i * pc.ldq + h * 128u + d]); barrier();
+    uint nk = i + 1u; float mx = -1e30;
+    for (uint j = d; j < nk; j += 128u) { float s = 0.0; uint kb = j * pc.ldk + kh * 128u;
+        for (uint e = 0u; e < 128u; e++) s += qs[e] * float(k[kb + e]);
+        s *= pc.scale; sc[j] = s; mx = max(mx, s); }
+    mx = subgroupMax(mx); if (subgroupElect()) red[gl_SubgroupID] = mx; barrier();
+    mx = red[0]; for (uint t = 1u; t < gl_NumSubgroups; t++) mx = max(mx, red[t]); barrier();
+    float sum = 0.0;
+    for (uint j = d; j < nk; j += 128u) { float e = exp(sc[j] - mx); sc[j] = e; sum += e; }
+    sum = subgroupAdd(sum); if (subgroupElect()) red[gl_SubgroupID] = sum; barrier();
+    sum = 0.0; for (uint t = 0u; t < gl_NumSubgroups; t++) sum += red[t];
+    float acc = 0.0;
+    for (uint j = 0u; j < nk; j++) acc += sc[j] * float(v[j * pc.ldv + kh * 128u + d]);
+    o[i * pc.ldo + h * 128u + d] = float16_t(acc / sum);
+}

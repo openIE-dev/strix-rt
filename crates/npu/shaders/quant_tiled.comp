@@ -1,0 +1,46 @@
+#version 450
+// One workgroup per token: optional blockwise (1024) normalized Walsh-Hadamard, per-token symmetric int8
+// quantization, written straight into the NPU A buffer in the wa_dc tiled layout [M/m][K/k][m][k].
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer A { uint a[]; };
+layout(std430, binding = 2) writeonly buffer S { float sx[]; };
+layout(push_constant) uniform P { uint K; uint m; uint k; uint hadamard; } p;
+shared float row[8192];
+shared float red[64];
+float q(float v, float inv) { float t = v * inv; return clamp(sign(t) * floor(abs(t) + 0.5), -127.0, 127.0); }
+void main() {
+  uint r = gl_WorkGroupID.x, tid = gl_LocalInvocationID.x;
+  for (uint i = tid; i < p.K; i += 256u) row[i] = x[r * p.K + i];
+  barrier();
+  if (p.hadamard != 0u) {
+    for (uint h = 1u; h < 1024u; h <<= 1u) {
+      for (uint i = tid; i < p.K / 2u; i += 256u) {
+        uint i0 = (i / h) * 2u * h + (i % h), i1 = i0 + h;
+        float u = row[i0], v = row[i1]; row[i0] = u + v; row[i1] = u - v;
+      }
+      barrier();
+    }
+    for (uint i = tid; i < p.K; i += 256u) row[i] *= 0.03125;
+    barrier();
+  }
+  float mx = 0.0;
+  for (uint i = tid; i < p.K; i += 256u) mx = max(mx, abs(row[i]));
+  mx = subgroupMax(mx);
+  if (gl_SubgroupInvocationID == 0u) red[gl_SubgroupID] = mx;
+  barrier();
+  if (tid == 0u) { float m2 = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) m2 = max(m2, red[i]); red[63] = m2; }
+  barrier();
+  float amax = red[63];
+  float sc = amax > 0.0 ? amax / 127.0 : 1.0;
+  if (tid == 0u) sx[r] = sc;
+  float inv = 1.0 / sc;
+  uint mb = r / p.m, ii = r % p.m;
+  for (uint i4 = tid; i4 < p.K / 4u; i4 += 256u) {
+    uint kx = i4 * 4u, kb = kx / p.k, j = kx % p.k;
+    uint o = ((mb * (p.K / p.k) + kb) * p.m + ii) * p.k + j;
+    int q0 = int(q(row[kx], inv)), q1 = int(q(row[kx + 1u], inv)), q2 = int(q(row[kx + 2u], inv)), q3 = int(q(row[kx + 3u], inv));
+    a[o / 4u] = uint(q0 & 255) | (uint(q1 & 255) << 8) | (uint(q2 & 255) << 16) | (uint(q3 & 255) << 24);
+  }
+}

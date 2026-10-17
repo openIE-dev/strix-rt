@@ -1,0 +1,36 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+prompt 512 tok in 0.331s (1547.9 tok/s) | decode 1 tok GPU 0.019s = 52.09 tok/s | wall 0.020s = 49.44 tok/s
+prompt 512 tok in 0.331s (1549.2 tok/s) | decode 1 tok GPU 0.019s = 52.17 tok/s | wall 0.020s = 49.65 tok/s
+prompt 512 tok in 0.330s (1550.9 tok/s) | decode 1 tok GPU 0.019s = 52.14 tok/s | wall 0.020s = 49.51 tok/s
+prompt 512 tok in 0.331s (1548.4 tok/s) | decode 1 tok GPU 0.019s = 52.15 tok/s | wall 0.020s = 50.07 tok/s
+prompt 512 tok in 0.330s (1551.2 tok/s) | decode 1 tok GPU 0.019s = 52.29 tok/s | wall 0.020s = 49.72 tok/s
+prompt 512 tok in 0.330s (1553.1 tok/s) | decode 1 tok GPU 0.019s = 52.15 tok/s | wall 0.020s = 49.72 tok/s
+prompt 512 tok in 0.331s (1545.4 tok/s) | decode 1 tok GPU 0.019s = 52.29 tok/s | wall 0.020s = 49.67 tok/s
+prompt 512 tok in 0.331s (1547.2 tok/s) | decode 1 tok GPU 0.019s = 52.17 tok/s | wall 0.020s = 49.61 tok/s
+prompt 512 tok in 0.331s (1548.6 tok/s) | decode 1 tok GPU 0.019s = 52.09 tok/s | wall 0.020s = 48.87 tok/s
+prompt 512 tok in 0.331s (1546.8 tok/s) | decode 1 tok GPU 0.019s = 52.20 tok/s | wall 0.020s = 49.71 tok/s
+prompt 512 tok in 0.332s (1540.3 tok/s) | decode 1 tok GPU 0.019s = 52.23 tok/s | wall 0.020s = 51.07 tok/s
+prompt 512 tok in 0.331s (1549.1 tok/s) | decode 1 tok GPU 0.019s = 52.15 tok/s | wall 0.020s = 49.95 tok/s
+prompt 512 tok in 0.330s (1551.2 tok/s) | decode 1 tok GPU 0.019s = 52.23 tok/s | wall 0.020s = 50.21 tok/s
+prompt 512 tok in 0.331s (1547.2 tok/s) | decode 1 tok GPU 0.019s = 52.14 tok/s | wall 0.020s = 49.48 tok/s
+prompt 512 tok in 0.330s (1549.7 tok/s) | decode 1 tok GPU 0.019s = 52.13 tok/s | wall 0.020s = 49.71 tok/s
+prompt 512 tok in 0.330s (1549.5 tok/s) | decode 1 tok GPU 0.019s = 52.15 tok/s | wall 0.020s = 49.47 tok/s
+prompt 512 tok in 0.331s (1549.0 tok/s) | decode 1 tok GPU 0.019s = 52.13 tok/s | wall 0.020s = 49.72 tok/s
+prompt 512 tok in 0.331s (1547.7 tok/s) | decode 1 tok GPU 0.019s = 52.10 tok/s | wall 0.020s = 49.17 tok/s
+prompt 512 tok in 0.330s (1550.1 tok/s) | decode 1 tok GPU 0.019s = 52.16 tok/s | wall 0.020s = 50.80 tok/s
+prompt 512 tok in 0.332s (1544.3 tok/s) | decode 1 tok GPU 0.019s = 52.14 tok/s | wall 0.020s = 49.40 tok/s
+duration 99.000 s, 1981 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package      7006.998      70.78        9.38     6078.025  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores        4281.883      43.25        0.29     4252.962  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu     4245.814      42.89        0.35     4210.701  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone      294.917       2.98        0.01      294.214  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx               719.428       7.27        1.96      525.060  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other        1986.746      20.07        8.86     1109.411  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket           6951.988      70.22       11.18     5845.172  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon        6912.418      69.82       10.83     5840.362  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

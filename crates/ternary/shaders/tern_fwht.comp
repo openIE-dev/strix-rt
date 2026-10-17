@@ -1,0 +1,37 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+// Bonsai 2 online activation transform: y = H_1024( perm(x) * signs ) per 1024-block,
+// H normalized Sylvester Walsh-Hadamard. One workgroup (256 lanes x 4 elems) per block.
+// perm: GDN v-grouped reorder for ssm_out inputs, tiled [hd, nk, rep] -> grouped [hd, rep, nk]
+// (rep == 1 -> identity). flags bit0: apply signs before H (weight-side rotation, x' = H(s*x));
+// bit1: apply signs after H instead (inverse, used after the token_embd lookup: h = s * (H z)). Batched: workgroup id = token * (K/1024) + block.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer Y { float y[]; };
+layout(std430, binding = 2) readonly buffer S { float sg[]; };
+layout(push_constant) uniform PC { uint K; uint x_off; uint y_off; uint flags; uint hd; uint nk; uint rep; } pc;
+shared float s[1024];
+void main() {
+    const uint id = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x, t = gl_LocalInvocationID.x;
+    const uint NB = pc.K / 1024u, tok = id / NB, blk = id % NB;
+    const uint xo = pc.x_off + tok * pc.K, yo = pc.y_off + tok * pc.K;
+    [[unroll]] for (uint i = 0u; i < 4u; i++) {
+        const uint o = blk * 1024u + t + 256u * i;
+        uint src = o;
+        if (pc.rep > 1u) { uint h = o % pc.hd; uint r = (o / pc.hd) % pc.rep; uint k = o / (pc.hd * pc.rep); src = h + pc.hd * (k + pc.nk * r); }
+        float v = x[xo + src];
+        if ((pc.flags & 1u) != 0u) v *= sg[o];
+        s[t + 256u * i] = v;
+    }
+    barrier();
+    [[unroll]] for (uint h = 1u; h < 1024u; h <<= 1) {
+        [[unroll]] for (uint i = 0u; i < 2u; i++) {
+            const uint p = t + 256u * i;              // pair index 0..511
+            const uint j = (p / h) * 2u * h + (p % h);
+            const float a = s[j], b = s[j + h];
+            s[j] = a + b; s[j + h] = a - b;
+        }
+        barrier();
+    }
+    [[unroll]] for (uint i = 0u; i < 4u; i++) { const uint o = blk * 1024u + t + 256u * i; float v = s[t + 256u * i] * 0.03125; if ((pc.flags & 2u) != 0u) v *= sg[o]; y[yo + o] = v; }
+}

@@ -1,0 +1,36 @@
+#version 450
+// Kev pointer head on the GPU. mode 0 (one workgroup per selected row r): final RMSNorm of residual row rows[r] of x, then
+// p[r] = W h + b with W = q (r == 0, the <decide> row) or k (option rows). Weights are stored transposed ([d][256]) so lanes
+// read consecutive floats. mode 1 (one workgroup per option j): logits[j] = p[1+j] . p[0] * scale (scale = 1/sqrt(256)/T).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer F { float f32b[]; };
+layout(std430, binding = 2) readonly buffer H { float hp[]; };   // qT[d*256], qb[256], kT[d*256], kb[256]
+layout(std430, binding = 3) buffer P { float p[]; };             // p[nr*256], then logits[nr-1]
+layout(std430, binding = 4) readonly buffer R { uint rows[]; };
+layout(push_constant) uniform PC { uint d; uint norm_off; uint nr; float eps; float scale; uint mode; } pc;
+shared float hs[8192];
+shared float red[256];
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    if (pc.mode == 0u) {
+        uint r = gl_WorkGroupID.x; uint base = rows[r] * pc.d;
+        float s = 0.0;
+        for (uint i = t; i < pc.d; i += 256u) { float v = x[base + i]; hs[i] = v; s += v * v; }
+        red[t] = s; barrier();
+        for (uint o = 128u; o > 0u; o >>= 1) { if (t < o) red[t] += red[t + o]; barrier(); }
+        float inv = inversesqrt(red[0] / float(pc.d) + pc.eps);
+        barrier();
+        for (uint i = t; i < pc.d; i += 256u) hs[i] = hs[i] * inv * f32b[pc.norm_off + i];
+        barrier();
+        uint wo = (r == 0u) ? 0u : (pc.d * 256u + 256u);
+        float acc = hp[wo + pc.d * 256u + t];
+        for (uint i = 0u; i < pc.d; i++) acc += hp[wo + i * 256u + t] * hs[i];
+        p[r * 256u + t] = acc;
+    } else {
+        uint j = gl_WorkGroupID.x + 1u;
+        red[t] = p[j * 256u + t] * p[t]; barrier();
+        for (uint o = 128u; o > 0u; o >>= 1) { if (t < o) red[t] += red[t + o]; barrier(); }
+        if (t == 0u) p[pc.nr * 256u + j - 1u] = red[0] * pc.scale;
+    }
+}

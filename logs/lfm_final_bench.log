@@ -1,0 +1,25 @@
+== dmabuf
+weights: zero-copy dmabuf in 0.373s, 41 arenas/imports (13928 MiB), 221 quant tensors, 5334656 f32 floats
+prompt 13 steps: GPU 0.106s wall 2.282s | decode 127 tok: wall 1.023s = 124.20 tok/s; GPU 8.003 ms/tok = 124.95 tok/s
+prompt 13 steps: GPU 0.104s wall 0.105s | decode 127 tok: wall 1.024s = 123.98 tok/s; GPU 8.060 ms/tok = 124.07 tok/s
+prompt 13 steps: GPU 0.104s wall 0.105s | decode 127 tok: wall 1.017s = 124.89 tok/s; GPU 8.000 ms/tok = 125.00 tok/s
+prompt 13 steps: GPU 0.104s wall 0.111s | decode 127 tok: wall 1.017s = 124.86 tok/s; GPU 8.003 ms/tok = 124.96 tok/s
+prompt 13 steps: GPU 0.104s wall 0.105s | decode 127 tok: wall 1.023s = 124.10 tok/s; GPU 8.003 ms/tok = 124.95 tok/s
+== copied
+weights: copied in 2.705s, 8 arenas/imports (13825 MiB), 221 quant tensors, 5334656 f32 floats
+prompt 13 steps: GPU 0.102s wall 0.201s | decode 127 tok: wall 1.001s = 126.83 tok/s; GPU 7.871 ms/tok = 127.05 tok/s
+prompt 13 steps: GPU 0.102s wall 0.117s | decode 127 tok: wall 1.151s = 110.32 tok/s; GPU 7.871 ms/tok = 127.06 tok/s
+prompt 13 steps: GPU 0.102s wall 0.104s | decode 127 tok: wall 1.015s = 125.08 tok/s; GPU 7.870 ms/tok = 127.06 tok/s
+prompt 13 steps: GPU 0.102s wall 0.262s | decode 127 tok: wall 1.001s = 126.86 tok/s; GPU 7.870 ms/tok = 127.06 tok/s
+prompt 13 steps: GPU 0.102s wall 0.119s | decode 127 tok: wall 1.168s = 108.72 tok/s; GPU 7.870 ms/tok = 127.06 tok/s
+== dmabuf, teacher-forced
+ref cpu: teacher-forced top-1 agreement: 117/129 generated positions; first mismatch at generated index Some(1)
+ref vk: teacher-forced top-1 agreement: 121/129 generated positions; first mismatch at generated index Some(10)
+ref hip: teacher-forced top-1 agreement: 121/129 generated positions; first mismatch at generated index Some(10)
+== free-run ids vs llama.cpp Vulkan ids (generated part)
+cpu identical prefix length: 1
+vk identical prefix length: 10
+hip identical prefix length: 10
+prompt 13 steps: GPU 0.107s wall 2.263s | decode 127 tok: wall 1.019s = 124.68 tok/s; GPU 8.012 ms/tok = 124.82 tok/s
+prompt 13 steps: GPU 0.105s wall 0.106s | decode 127 tok: wall 1.017s = 124.84 tok/s; GPU 8.002 ms/tok = 124.96 tok/s
+prompt 13 steps: GPU 0.104s wall 0.105s | decode 127 tok: wall 1.017s = 124.84 tok/s; GPU 8.002 ms/tok = 124.96 tok/s

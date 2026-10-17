@@ -1,0 +1,139 @@
++ F=~/strix-fio.dat
++ '[' -f ~/strix-fio.dat ']'
++ fio --name=mk --filename=~/strix-fio.dat --size=16G --rw=write --bs=4M --direct=1 --ioengine=io_uring --iodepth=16 --output-format=terse
++ drop
++ sync
++ sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
++ dd if=$MODELS/q7.gguf of=/dev/null bs=16M
++ tail -1
+4683074240 bytes (4.7 GB, 4.4 GiB) copied, 0.670268 s, 7.0 GB/s
++ drop
++ sync
++ sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
++ dd if=~/strix-fio.dat of=/dev/null bs=16M
++ tail -1
+17179869184 bytes (17 GB, 16 GiB) copied, 2.47516 s, 6.9 GB/s
++ for cfg in "seq 1M 32 1" "seq 4M 16 1" "seq 1M 32 4" "seq 4M 32 4" "rand 2M 16 1" "rand 2M 32 4" "rand 128k 64 4" "rand 4k 128 4"
++ set -- seq 1M 32 1
++ rw=read
++ '[' seq = rand ']'
++ drop
++ sync
++ sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
++ fio --name=t --filename=~/strix-fio.dat --size=16G --rw=read --bs=1M --iodepth=32 --numjobs=1 --group_reporting --direct=1 --ioengine=io_uring --runtime=15 --time_based=0 --output-format=normal
++ head -2
++ grep -E 'READ:|IOPS='
+  read: IOPS=6886, BW=6887MiB/s (7221MB/s)(16.0GiB/2379msec)
+   READ: bw=6887MiB/s (7221MB/s), 6887MiB/s-6887MiB/s (7221MB/s-7221MB/s), io=16.0GiB (17.2GB), run=2379-2379msec
++ echo '  ^ io_uring O_DIRECT seq bs=1M qd=32 jobs=1'
+  ^ io_uring O_DIRECT seq bs=1M qd=32 jobs=1
++ for cfg in "seq 1M 32 1" "seq 4M 16 1" "seq 1M 32 4" "seq 4M 32 4" "rand 2M 16 1" "rand 2M 32 4" "rand 128k 64 4" "rand 4k 128 4"
++ set -- seq 4M 16 1
++ rw=read
++ '[' seq = rand ']'
++ drop
++ sync
++ sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
++ fio --name=t --filename=~/strix-fio.dat --size=16G --rw=read --bs=4M --iodepth=16 --numjobs=1 --group_reporting --direct=1 --ioengine=io_uring --runtime=15 --time_based=0 --output-format=normal
++ grep -E 'READ:|IOPS='
++ head -2
+  read: IOPS=1718, BW=6875MiB/s (7209MB/s)(16.0GiB/2383msec)
+   READ: bw=6875MiB/s (7209MB/s), 6875MiB/s-6875MiB/s (7209MB/s-7209MB/s), io=16.0GiB (17.2GB), run=2383-2383msec
++ echo '  ^ io_uring O_DIRECT seq bs=4M qd=16 jobs=1'
+  ^ io_uring O_DIRECT seq bs=4M qd=16 jobs=1
++ for cfg in "seq 1M 32 1" "seq 4M 16 1" "seq 1M 32 4" "seq 4M 32 4" "rand 2M 16 1" "rand 2M 32 4" "rand 128k 64 4" "rand 4k 128 4"
++ set -- seq 1M 32 4
++ rw=read
++ '[' seq = rand ']'
++ drop
++ sync
++ sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
++ fio --name=t --filename=~/strix-fio.dat --size=16G --rw=read --bs=1M --iodepth=32 --numjobs=4 --group_reporting --direct=1 --ioengine=io_uring --runtime=15 --time_based=0 --output-format=normal
++ grep -E 'READ:|IOPS='
++ head -2
+  read: IOPS=6890, BW=6891MiB/s (7225MB/s)(64.0GiB/9511msec)
+   READ: bw=6891MiB/s (7225MB/s), 6891MiB/s-6891MiB/s (7225MB/s-7225MB/s), io=64.0GiB (68.7GB), run=9511-9511msec
++ echo '  ^ io_uring O_DIRECT seq bs=1M qd=32 jobs=4'
+  ^ io_uring O_DIRECT seq bs=1M qd=32 jobs=4
++ for cfg in "seq 1M 32 1" "seq 4M 16 1" "seq 1M 32 4" "seq 4M 32 4" "rand 2M 16 1" "rand 2M 32 4" "rand 128k 64 4" "rand 4k 128 4"
++ set -- seq 4M 32 4
++ rw=read
++ '[' seq = rand ']'
++ drop
++ sync
++ sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
++ fio --name=t --filename=~/strix-fio.dat --size=16G --rw=read --bs=4M --iodepth=32 --numjobs=4 --group_reporting --direct=1 --ioengine=io_uring --runtime=15 --time_based=0 --output-format=normal
++ grep -E 'READ:|IOPS='
++ head -2
+  read: IOPS=1719, BW=6877MiB/s (7211MB/s)(64.0GiB/9530msec)
+   READ: bw=6877MiB/s (7211MB/s), 6877MiB/s-6877MiB/s (7211MB/s-7211MB/s), io=64.0GiB (68.7GB), run=9530-9530msec
++ echo '  ^ io_uring O_DIRECT seq bs=4M qd=32 jobs=4'
+  ^ io_uring O_DIRECT seq bs=4M qd=32 jobs=4
++ for cfg in "seq 1M 32 1" "seq 4M 16 1" "seq 1M 32 4" "seq 4M 32 4" "rand 2M 16 1" "rand 2M 32 4" "rand 128k 64 4" "rand 4k 128 4"
++ set -- rand 2M 16 1
++ rw=read
++ '[' rand = rand ']'
++ rw=randread
++ drop
++ sync
++ sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
++ fio --name=t --filename=~/strix-fio.dat --size=16G --rw=randread --bs=2M --iodepth=16 --numjobs=1 --group_reporting --direct=1 --ioengine=io_uring --runtime=15 --time_based=0 --output-format=normal
++ grep -E 'READ:|IOPS='
++ head -2
+  read: IOPS=3430, BW=6861MiB/s (7194MB/s)(16.0GiB/2388msec)
+   READ: bw=6861MiB/s (7194MB/s), 6861MiB/s-6861MiB/s (7194MB/s-7194MB/s), io=16.0GiB (17.2GB), run=2388-2388msec
++ echo '  ^ io_uring O_DIRECT rand bs=2M qd=16 jobs=1'
+  ^ io_uring O_DIRECT rand bs=2M qd=16 jobs=1
++ for cfg in "seq 1M 32 1" "seq 4M 16 1" "seq 1M 32 4" "seq 4M 32 4" "rand 2M 16 1" "rand 2M 32 4" "rand 128k 64 4" "rand 4k 128 4"
++ set -- rand 2M 32 4
++ rw=read
++ '[' rand = rand ']'
++ rw=randread
++ drop
++ sync
++ sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
++ fio --name=t --filename=~/strix-fio.dat --size=16G --rw=randread --bs=2M --iodepth=32 --numjobs=4 --group_reporting --direct=1 --ioengine=io_uring --runtime=15 --time_based=0 --output-format=normal
++ grep -E 'READ:|IOPS='
++ head -2
+  read: IOPS=3435, BW=6870MiB/s (7204MB/s)(64.0GiB/9539msec)
+   READ: bw=6870MiB/s (7204MB/s), 6870MiB/s-6870MiB/s (7204MB/s-7204MB/s), io=64.0GiB (68.7GB), run=9539-9539msec
++ echo '  ^ io_uring O_DIRECT rand bs=2M qd=32 jobs=4'
+  ^ io_uring O_DIRECT rand bs=2M qd=32 jobs=4
++ for cfg in "seq 1M 32 1" "seq 4M 16 1" "seq 1M 32 4" "seq 4M 32 4" "rand 2M 16 1" "rand 2M 32 4" "rand 128k 64 4" "rand 4k 128 4"
++ set -- rand 128k 64 4
++ rw=read
++ '[' rand = rand ']'
++ rw=randread
++ drop
++ sync
++ sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
++ fio --name=t --filename=~/strix-fio.dat --size=16G --rw=randread --bs=128k --iodepth=64 --numjobs=4 --group_reporting --direct=1 --ioengine=io_uring --runtime=15 --time_based=0 --output-format=normal
++ head -2
++ grep -E 'READ:|IOPS='
+  read: IOPS=55.0k, BW=6871MiB/s (7205MB/s)(64.0GiB/9538msec)
+   READ: bw=6871MiB/s (7205MB/s), 6871MiB/s-6871MiB/s (7205MB/s-7205MB/s), io=64.0GiB (68.7GB), run=9538-9538msec
++ echo '  ^ io_uring O_DIRECT rand bs=128k qd=64 jobs=4'
+  ^ io_uring O_DIRECT rand bs=128k qd=64 jobs=4
++ for cfg in "seq 1M 32 1" "seq 4M 16 1" "seq 1M 32 4" "seq 4M 32 4" "rand 2M 16 1" "rand 2M 32 4" "rand 128k 64 4" "rand 4k 128 4"
++ set -- rand 4k 128 4
++ rw=read
++ '[' rand = rand ']'
++ rw=randread
++ drop
++ sync
++ sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
++ fio --name=t --filename=~/strix-fio.dat --size=16G --rw=randread --bs=4k --iodepth=128 --numjobs=4 --group_reporting --direct=1 --ioengine=io_uring --runtime=15 --time_based=0 --output-format=normal
++ grep -E 'READ:|IOPS='
++ head -2
+  read: IOPS=1714k, BW=6697MiB/s (7022MB/s)(64.0GiB/9786msec)
+   READ: bw=6697MiB/s (7022MB/s), 6697MiB/s-6697MiB/s (7022MB/s-7022MB/s), io=64.0GiB (68.7GB), run=9786-9786msec
++ echo '  ^ io_uring O_DIRECT rand bs=4k qd=128 jobs=4'
+  ^ io_uring O_DIRECT rand bs=4k qd=128 jobs=4
++ drop
++ sync
++ sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
++ fio --name=t --filename=~/strix-fio.dat --size=16G --rw=read --bs=1M --iodepth=32 --numjobs=1 --direct=0 --ioengine=io_uring --runtime=15
++ grep -E READ:
+   READ: bw=6875MiB/s (7209MB/s), 6875MiB/s-6875MiB/s (7209MB/s-7209MB/s), io=16.0GiB (17.2GB), run=2383-2383msec
++ echo '  ^ io_uring BUFFERED seq 1M qd32'
+  ^ io_uring BUFFERED seq 1M qd32

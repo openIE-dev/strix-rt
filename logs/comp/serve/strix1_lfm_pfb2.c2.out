@@ -1,0 +1,17 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+{"conc": 2, "requests": 20, "success_rate": 1.0, "completion_tok_s": 94.01233631301886, "mean_ttft_ms": 496.98839880002197, "mean_e2e_ms": 1359.0180254499046, "mean_ctoks": 64.0, "mean_ptoks": 607.9, "wall_s": 13.615234449000127, "errors": []}
+duration 16.500 s, 166 samples (10 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package      1715.262     103.95        8.16     1580.605  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores           8.627       0.52        0.17        5.745  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu        8.672       0.53        0.49        0.647  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        0.315       0.02        0.01        0.200  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx               893.052      54.12        0.12      891.046  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other         736.862      44.66        8.56      595.608  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket           1638.586      99.31        9.17     1487.302  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon        1631.083      98.85        8.61     1489.051  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

@@ -1,0 +1,52 @@
+#version 450
+// Reductions (256 lanes):
+//  0 GroupNorm partials: workgroup w sums x and x^2 per group (32 groups of C/32 channels) over pixels [w*chunk, ..) of X [pix][C]
+//    -> O[(w*32 + g)*2 + {0,1}]
+//  1 GroupNorm finalize (1 workgroup): G[2g] = mean, G[2g+1] = rstd over nw partials in F, count = npix*C/32, eps
+//  2 row softmax: P[r*ldp + j] = f16(exp(s*scale - max) / sum) for j < nk, 0 for nk <= j < ldp; S = F [r*lds + j]
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float16_t x[]; };
+layout(std430, binding = 1) buffer F { float o[]; };
+layout(std430, binding = 2) writeonly buffer P { float16_t p[]; };
+layout(std430, binding = 3) writeonly buffer G { float gs[]; };
+layout(push_constant) uniform PC { uint mode; uint C; uint npix; uint chunk; uint nw; float eps; uint nk; uint lds; uint ldp; float scale; } pc;
+shared float sh[8 * 64];
+float bsum(float v, uint slot) {   // block sum via subgroups; result valid in all lanes
+    v = subgroupAdd(v); if (subgroupElect()) sh[gl_SubgroupID * 64u + slot] = v; barrier();
+    float s = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) s += sh[i * 64u + slot]; barrier(); return s;
+}
+float bmax(float v) { v = subgroupMax(v); if (subgroupElect()) sh[gl_SubgroupID * 64u] = v; barrier();
+    float s = -1e30; for (uint i = 0u; i < gl_NumSubgroups; i++) s = max(s, sh[i * 64u]); barrier(); return s; }
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    if (pc.mode == 0u) {
+        uint w = gl_WorkGroupID.x, p0 = w * pc.chunk, p1 = min(p0 + pc.chunk, pc.npix), cg = pc.C / 32u;
+        // lanes own fixed channels: lane covers channel c = tid % C (C >= 128 or C divides 256)
+        float s[2] = float[2](0.0, 0.0), q[2] = float[2](0.0, 0.0);
+        uint lanes_per_pix = min(pc.C, 256u), ppi = 256u / lanes_per_pix;   // pixels per iteration
+        uint cl = tid % lanes_per_pix, pofs = tid / lanes_per_pix;
+        for (uint cc = 0u; cc < 2u; cc++) { uint c = cl + cc * 256u; if (c >= pc.C) break;
+            for (uint pp = p0 + pofs; pp < p1; pp += ppi) { float v = float(x[pp * pc.C + c]); s[cc] += v; q[cc] += v * v; } }
+        // reduce per group: group of channel c = c / cg
+        for (uint g = 0u; g < 32u; g++) {
+            float a = 0.0, b2 = 0.0;
+            for (uint cc = 0u; cc < 2u; cc++) { uint c = cl + cc * 256u; if (c < pc.C && c / cg == g) { a += s[cc]; b2 += q[cc]; } }
+            a = bsum(a, 0u); b2 = bsum(b2, 1u);
+            if (tid == 0u) { o[(w * 32u + g) * 2u] = a; o[(w * 32u + g) * 2u + 1u] = b2; }
+        }
+    } else if (pc.mode == 1u) {
+        if (tid < 32u) { float a = 0.0, b2 = 0.0; for (uint w = 0u; w < pc.nw; w++) { a += o[(w * 32u + tid) * 2u]; b2 += o[(w * 32u + tid) * 2u + 1u]; }
+            float cnt = float(pc.npix) * float(pc.C / 32u); float m = a / cnt; float var = max(b2 / cnt - m * m, 0.0);
+            gs[2u * tid] = m; gs[2u * tid + 1u] = inversesqrt(var + pc.eps); }
+    } else {
+        uint r = gl_WorkGroupID.x, sb = r * pc.lds;
+        float mx = -1e30; for (uint j = tid; j < pc.nk; j += 256u) mx = max(mx, o[sb + j] * pc.scale); mx = bmax(mx);
+        float sum = 0.0; for (uint j = tid; j < pc.nk; j += 256u) sum += exp(o[sb + j] * pc.scale - mx); sum = bsum(sum, 0u);
+        float inv = 1.0 / sum;
+        for (uint j = tid; j < pc.ldp; j += 256u) p[r * pc.ldp + j] = j < pc.nk ? float16_t(exp(o[sb + j] * pc.scale - mx) * inv) : float16_t(0.0);
+    }
+}

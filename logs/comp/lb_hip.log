@@ -1,0 +1,135 @@
+=== 2026-10-15T08:54:34Z tools/comp/lb_hip.sh ~/llama-latest/build-rocm714/bin hip_q38 $MODELS/Qwen3.8-27B-UD-Q4_K_M.gguf
+08:54:37 quiet
+perf level: high
+~/strix-rt/tools/comp/lb.sh: line 4: 1898630 Segmentation fault         (core dumped) $B/llama-bench -m $M -ngl 999 -fa on -b 2048 -ub 512 -p 512,2048,8192 -n 128 -r 3 -o json > $O/$T.json 2> $O/$T.err
+pp/tg rc 139
+~/strix-rt/tools/comp/lb.sh: line 5: 1898940 Segmentation fault         (core dumped) $B/llama-bench -m $M -ngl 999 -fa on -b 2048 -ub 512 -p 0 -n 128 -d 8192 -r 3 -o json > $O/$T.d8192.json 2> $O/$T.d8192.err
+depth rc 139
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import json,sys;[print(sys.argv[1],r["n_prompt"],r["n_gen"],r["n_depth"],round(r["avg_ts"],2),round(r["stddev_ts"],2)) for f in sys.argv[2:] for r in json.load(open(f))]
+                                                                                                                                                          ~~~~~~~~~^^^^^^^^^
+  File "/usr/lib/python3.14/json/__init__.py", line 298, in load
+    return loads(fp.read(),
+        cls=cls, object_hook=object_hook,
+        parse_float=parse_float, parse_int=parse_int,
+        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)
+  File "/usr/lib/python3.14/json/__init__.py", line 352, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/lib/python3.14/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/json/decoder.py", line 363, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+=== rc 1 2026-10-15T08:55:08Z
+=== 2026-10-15T08:55:08Z tools/comp/lb_hip.sh ~/llama-latest/build-rocm714/bin hip_lfm $MODELS/LFM2.5-24B-A2B-Q4_K_M.gguf
+08:55:10 quiet
+perf level: high
+~/strix-rt/tools/comp/lb.sh: line 4: 1900977 Segmentation fault         (core dumped) $B/llama-bench -m $M -ngl 999 -fa on -b 2048 -ub 512 -p 512,2048,8192 -n 128 -r 3 -o json > $O/$T.json 2> $O/$T.err
+pp/tg rc 139
+~/strix-rt/tools/comp/lb.sh: line 5: 1900989 Segmentation fault         (core dumped) $B/llama-bench -m $M -ngl 999 -fa on -b 2048 -ub 512 -p 0 -n 128 -d 8192 -r 3 -o json > $O/$T.d8192.json 2> $O/$T.d8192.err
+depth rc 139
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import json,sys;[print(sys.argv[1],r["n_prompt"],r["n_gen"],r["n_depth"],round(r["avg_ts"],2),round(r["stddev_ts"],2)) for f in sys.argv[2:] for r in json.load(open(f))]
+                                                                                                                                                          ~~~~~~~~~^^^^^^^^^
+  File "/usr/lib/python3.14/json/__init__.py", line 298, in load
+    return loads(fp.read(),
+        cls=cls, object_hook=object_hook,
+        parse_float=parse_float, parse_int=parse_int,
+        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)
+  File "/usr/lib/python3.14/json/__init__.py", line 352, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/lib/python3.14/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.14/json/decoder.py", line 363, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+=== rc 1 2026-10-15T08:58:52Z
+=== 2026-10-15T08:58:52Z tools/comp/lb_hip.sh ~/llama-latest/build-rocm714/bin hip_mcv $MODELS/minicpmv47/MiniCPM-V-4_7-35B-A3B-Q4_K_M.gguf
+08:58:54 quiet
+perf level: high
+pp/tg rc 0
+depth rc 0
+hip_mcv 512 0 0 1530.95 69.7
+hip_mcv 2048 0 0 1543.38 22.23
+hip_mcv 8192 0 0 1425.48 58.82
+hip_mcv 0 128 0 64.02 0.09
+hip_mcv 0 128 8192 63.49 0.31
+=== rc 0 2026-10-15T09:15:19Z
+=== 2026-10-15T09:15:19Z tools/comp/lb_hip.sh ~/llama-latest/build-rocm714/bin hip_q36 $MODELS/bench/Qwen3.6-35B-A3B-Q8_0.gguf
+09:15:22 quiet
+=== 2026-10-15T09:26:10Z tools/comp/lb_hip.sh ~/llama-latest/build-rocm713/bin hip_q38 $MODELS/Qwen3.8-27B-UD-Q4_K_M.gguf
+09:26:12 quiet
+perf level: high
+pp/tg rc 0
+depth rc 0
+hip_q36 512 0 0 1078.12 649.51
+hip_q36 2048 0 0 1440.85 17.68
+hip_q36 8192 0 0 1270.59 98.0
+hip_q36 0 128 0 48.64 0.07
+hip_q36 0 128 8192 47.35 0.18
+=== rc 0 2026-10-15T09:33:01Z
+perf level: high
+pp/tg rc 0
+depth rc 0
+hip_q38 512 0 0 425.41 6.24
+hip_q38 2048 0 0 425.95 1.47
+hip_q38 8192 0 0 404.4 2.33
+hip_q38 0 128 0 12.86 0.01
+hip_q38 0 128 8192 12.33 0.22
+=== rc 0 2026-10-15T10:00:37Z
+=== 2026-10-15T10:00:37Z tools/comp/lb_hip.sh ~/llama-latest/build-rocm713/bin hip_lfm $MODELS/LFM2.5-24B-A2B-Q4_K_M.gguf
+10:00:39 quiet
+perf level: high
+pp/tg rc 0
+depth rc 0
+hip_lfm 512 0 0 2626.71 81.83
+hip_lfm 2048 0 0 2706.96 22.56
+hip_lfm 8192 0 0 2625.79 13.85
+hip_lfm 0 128 0 100.66 0.27
+hip_lfm 0 128 8192 95.9 0.3
+=== rc 0 2026-10-15T10:16:22Z
+=== 2026-10-15T10:16:22Z tools/comp/lb_hip.sh ~/llama-latest/build-rocm713/bin hip_mcv $MODELS/minicpmv47/MiniCPM-V-4_7-35B-A3B-Q4_K_M.gguf
+10:16:24 quiet
+perf level: high
+pp/tg rc 0
+depth rc 0
+hip_mcv 512 0 0 1543.64 77.86
+hip_mcv 2048 0 0 1562.84 16.97
+hip_mcv 8192 0 0 1226.99 36.9
+hip_mcv 0 128 0 64.2 0.12
+hip_mcv 0 128 8192 62.19 0.3
+=== rc 0 2026-10-15T11:00:37Z
+=== 2026-10-15T11:00:37Z tools/comp/lb_hip.sh ~/llama-latest/build-rocm713/bin hip_q36 $MODELS/bench/Qwen3.6-35B-A3B-Q8_0.gguf
+11:00:39 busy: 347237 100.5 mcv_ref
+11:01:12 quiet
+perf level: high
+pp/tg rc 0
+depth rc 0
+hip_q36 512 0 0 1409.56 62.98
+hip_q36 2048 0 0 1418.53 18.19
+hip_q36 8192 0 0 1356.28 3.7
+hip_q36 0 128 0 47.99 0.08
+hip_q36 0 128 8192 46.7 0.18
+=== rc 0 2026-10-15T11:10:31Z
+=== 2026-10-15T11:10:31Z tools/comp/lb_hip.sh ~/llama-latest/build-rocm713/bin hip_gptoss $MODELS/bench/gpt-oss-20b-MXFP4.gguf
+11:10:33 busy: 351429 357.2 vllm
+11:11:05 busy: 352221 376.1 python
+11:11:37 busy: 352555 101.0 VLLM::EngineCor
+11:12:10 busy: 352555 100.5 VLLM::EngineCor
+11:12:42 busy: 352555 101.0 VLLM::EngineCor
+11:13:14 quiet
+perf level: high
+pp/tg rc 0
+depth rc 0
+hip_gptoss 512 0 0 2092.25 47.65
+hip_gptoss 2048 0 0 2075.69 8.62
+hip_gptoss 8192 0 0 1423.18 59.73
+hip_gptoss 0 128 0 72.04 0.07
+hip_gptoss 0 128 8192 65.41 0.3
+=== rc 0 2026-10-15T11:42:46Z

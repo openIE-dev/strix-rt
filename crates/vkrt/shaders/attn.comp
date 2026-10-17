@@ -1,0 +1,43 @@
+#version 450
+// Single-token GQA attention over positions 0..pos. One workgroup (128 threads) per query head.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer Q { float q[]; };
+layout(std430, binding = 1) readonly buffer KC { float kc[]; };
+layout(std430, binding = 2) readonly buffer VC { float vc[]; };
+layout(std430, binding = 3) writeonly buffer O { float o[]; };
+layout(std430, binding = 4) readonly buffer P { uint params[]; };
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; uint max_ctx; } pc;
+shared float qs[128];
+shared float sc[4096];
+shared float red[8];
+void main() {
+    uint h = gl_WorkGroupID.x, t = gl_LocalInvocationID.x;
+    uint kvh = h / (pc.n_head / pc.n_kv);
+    uint n = params[0] + 1u;
+    uint stride = pc.n_kv * 128u;
+    qs[t] = q[h * 128u + t];
+    barrier();
+    float mx = -1e30;
+    for (uint p = t; p < n; p += 128u) {
+        uint base = pc.cache_off + p * stride + kvh * 128u;
+        float s = 0.0;
+        for (uint d = 0u; d < 128u; d++) s += qs[d] * kc[base + d];
+        s *= 0.08838834764831845; // 1/sqrt(128)
+        sc[p] = s; mx = max(mx, s);
+    }
+    mx = subgroupMax(mx);
+    if (gl_SubgroupInvocationID == 0u) red[gl_SubgroupID] = mx;
+    barrier();
+    mx = red[0]; for (uint i = 1u; i < gl_NumSubgroups; i++) mx = max(mx, red[i]);
+    barrier();
+    float sum = 0.0;
+    for (uint p = t; p < n; p += 128u) { float e = exp(sc[p] - mx); sc[p] = e; sum += e; }
+    sum = subgroupAdd(sum);
+    if (gl_SubgroupInvocationID == 0u) red[gl_SubgroupID] = sum;
+    barrier();
+    sum = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) sum += red[i];
+    float acc = 0.0;
+    for (uint p = 0u; p < n; p++) acc += sc[p] * vc[pc.cache_off + p * stride + kvh * 128u + t];
+    o[h * 128u + t] = acc / sum;
+}

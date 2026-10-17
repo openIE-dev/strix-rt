@@ -1,0 +1,28 @@
+[waited 0s for GPU lock; start 05:58:25]
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+weights: copied in 1.129s, 4 arenas/imports (6851 MiB), 498 quant tensors, 2645504 f32 floats
+hadamard: 401 rotated weights, inverse embed true, sign widths [5120, 6144, 17408], gdn perm (128, 16, 3)
+[npu split] weights folded in 2.5 s
+[npu split] 384 calls, npu 1488.2 ms, host wait for prep 2475.8 ms, total so far 4033.8 ms
+[npu split] 768 calls, npu 2889.0 ms, host wait for prep 5035.4 ms, total so far 4008.5 ms
+[npu split] 1152 calls, npu 4315.5 ms, host wait for prep 7556.4 ms, total so far 4006.0 ms
+[npu split] 1536 calls, npu 6040.5 ms, host wait for prep 9959.3 ms, total so far 4168.6 ms
+[npu split] 1920 calls, npu 7802.8 ms, host wait for prep 12554.4 ms, total so far 4404.7 ms
+[npu split] 2304 calls, npu 9511.5 ms, host wait for prep 15365.7 ms, total so far 4577.3 ms
+prefill 2048: best 4042.5 ms (all [4070, 4044, 4042, 4210, 4441, 4635]) -> pp2048 506.62 tok/s
+duration 29.618 s, 23610 samples (797 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package      3802.942     128.40       18.59     3252.428  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores     1245454.807   42050.41        2.65  1245376.407  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu      264.546       8.93        5.44      103.276  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone       20.488       0.69        0.82       -3.789  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx              1333.519      45.02       10.25     1029.895  gpu_metrics average_gfx_power [power-integrated]
+npu                45.077       1.52        0.29       36.409  gpu_metrics average_ipu_power [power-integrated]
+soc_other        2145.469      72.44       27.92     1318.620  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket           3788.611     127.92       43.91     2488.201  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon        3774.042     127.42       43.77     2477.791  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]
+[end 05:58:57; exit 0; ran under GPU lock]

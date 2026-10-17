@@ -1,0 +1,30 @@
+#version 450
+// Top-k selection from precomputed router logits (GEMM output, f32 [M][ldl]): one subgroup per token (8 tokens / workgroup).
+// p = sigmoid(logit); top-k of p + bias (lowest index on ties); weights = p / max(sum, 2^-14) (if norm) * scale.
+// r[t*tk + j] = expert, r[M*tk + t*tk + j] = weight bits. 512 experts, top-k <= 24.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer F { float f[]; };
+layout(std430, binding = 1) readonly buffer L { float lg[]; };
+layout(std430, binding = 2) writeonly buffer R { uint r[]; };
+layout(push_constant) uniform PC { uint b_off; uint n_exp; uint top_k; uint norm; float scale; uint ldl; uint m; } pc;
+void main() {
+    uint t = gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID, ln = gl_SubgroupInvocationID;
+    if (t >= pc.m) return;
+    float p[16], sv[16]; bool used[16];
+    for (uint i = 0u; i < 16u; i++) { uint e = ln + 32u * i; p[i] = e < pc.n_exp ? 1.0 / (1.0 + exp(-lg[t * pc.ldl + e])) : 0.0; sv[i] = e < pc.n_exp ? p[i] + f[pc.b_off + e] : -3.4e38; used[i] = e >= pc.n_exp; }
+    uint ids[24]; float ws[24]; float sum = 0.0;
+    for (uint j = 0u; j < pc.top_k; j++) {
+        float bv = -3.4e38; uint bi = 0xFFFFFFFFu;
+        for (uint i = 0u; i < 16u; i++) if (!used[i] && (sv[i] > bv || bi == 0xFFFFFFFFu)) { bv = sv[i]; bi = ln + 32u * i; }
+        float mx = subgroupMax(bi == 0xFFFFFFFFu ? -3.4e38 : bv);
+        uint win = subgroupMin((bi != 0xFFFFFFFFu && bv == mx) ? bi : 0xFFFFFFFFu);
+        float pw = 0.0;
+        if (win % 32u == ln) { used[win / 32u] = true; pw = p[win / 32u]; }
+        pw = subgroupMax(pw);
+        ids[j] = win; ws[j] = pw; sum += pw;
+    }
+    sum = max(sum, 6.103515625e-5);
+    if (ln == 0u) for (uint j = 0u; j < pc.top_k; j++) { float w = pc.norm != 0u ? ws[j] / sum : ws[j]; r[t * pc.top_k + j] = ids[j]; r[pc.m * pc.top_k + t * pc.top_k + j] = floatBitsToUint(w * pc.scale); }
+}

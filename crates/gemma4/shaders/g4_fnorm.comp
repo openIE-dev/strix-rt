@@ -1,0 +1,52 @@
+#version 450
+// Gemma 4 fused decode norms (one workgroup of 1024, K <= 4096), n(v) = v * rsqrt(mean(v^2) + eps):
+//   mode 0 (after o-proj):   x' = x + n(t) wa;  xw = n(x') wb;  xw2 = n(x') wc (wc != NONE)        [post_attention_norm, ffn_norm, pre_ffw_norm_2]
+//   mode 1 (end of MoE layer): m = n(t) wa + n(t2) wb;  x' = (x + n(m) wc) * s;  xw = n(x') wd (wd != NONE)
+//                               [post_ffw_norm_1, post_ffw_norm_2, post_ffw_norm, layer_output_scale, next attn_norm / output_norm]
+// key_word != 0 zeroes the argmax key au[key], au[key+1].
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 1024) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer T { float t[]; };
+layout(std430, binding = 2) readonly buffer T2 { float t2[]; };
+layout(std430, binding = 3) writeonly buffer XW { float xw[]; };
+layout(std430, binding = 4) writeonly buffer XW2 { float xw2[]; };
+layout(std430, binding = 5) buffer AU { uint au[]; };
+layout(std430, binding = 6) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint K; uint mode; uint wa; uint wb; uint wc; uint wd; uint s_off; uint key_word; float eps; } pc;
+const uint NONE = 0xFFFFFFFFu;
+shared float red[32][2];
+// sums of a^2 and b^2 over the workgroup
+vec2 rsum2(float a, float b) {
+    vec2 v = vec2(subgroupAdd(a), subgroupAdd(b));
+    barrier();
+    if (subgroupElect()) { red[gl_SubgroupID][0] = v.x; red[gl_SubgroupID][1] = v.y; }
+    barrier();
+    vec2 s = vec2(0.0); for (uint i = 0u; i < gl_NumSubgroups; i++) s += vec2(red[i][0], red[i][1]);
+    return s;
+}
+void main() {
+    uint tid = gl_LocalInvocationID.x, K = pc.K; float fk = float(K);
+    float a[4], b[4], c[4];
+    float sa = 0.0, sb = 0.0;
+    for (uint j = 0u; j < 4u; j++) { uint i = tid + 1024u * j; a[j] = i < K ? t[i] : 0.0; b[j] = (i < K && pc.mode == 1u) ? t2[i] : 0.0; sa += a[j] * a[j]; sb += b[j] * b[j]; }
+    vec2 s = rsum2(sa, sb);
+    float ra = inversesqrt(s.x / fk + pc.eps), rb = inversesqrt(s.y / fk + pc.eps);
+    float sx = 0.0;
+    if (pc.mode == 0u) {
+        for (uint j = 0u; j < 4u; j++) { uint i = tid + 1024u * j; if (i < K) { c[j] = x[i] + a[j] * ra * f32w[pc.wa + i]; x[i] = c[j]; } else c[j] = 0.0; sx += c[j] * c[j]; }
+    } else {
+        float sm = 0.0;
+        for (uint j = 0u; j < 4u; j++) { uint i = tid + 1024u * j; c[j] = i < K ? a[j] * ra * f32w[pc.wa + i] + b[j] * rb * f32w[pc.wb + i] : 0.0; sm += c[j] * c[j]; }
+        float rm = inversesqrt(rsum2(sm, 0.0).x / fk + pc.eps);
+        float sc = pc.s_off != NONE ? f32w[pc.s_off] : 1.0;
+        for (uint j = 0u; j < 4u; j++) { uint i = tid + 1024u * j; if (i < K) { c[j] = (x[i] + c[j] * rm * f32w[pc.wc + i]) * sc; x[i] = c[j]; } else c[j] = 0.0; sx += c[j] * c[j]; }
+    }
+    uint w1 = pc.mode == 0u ? pc.wb : pc.wd, w2 = pc.mode == 0u ? pc.wc : NONE;
+    if (w1 != NONE) {
+        float rx = inversesqrt(rsum2(sx, 0.0).x / fk + pc.eps);
+        for (uint j = 0u; j < 4u; j++) { uint i = tid + 1024u * j; if (i < K) { xw[i] = c[j] * rx * f32w[w1 + i]; if (w2 != NONE) xw2[i] = c[j] * rx * f32w[w2 + i]; } }
+    }
+    if (tid == 0u && pc.key_word != 0u) { au[pc.key_word] = 0u; au[pc.key_word + 1u] = 0u; }
+}

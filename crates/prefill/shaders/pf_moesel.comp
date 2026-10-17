@@ -1,0 +1,58 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+// Fused MoE expert selection + grouping (pf_rsel + pf_moesort in one dispatch, one workgroup of 32 wave32s).
+// Phase 1 (per token, one wave each, same math as pf_rsel): p = sigmoid(logit r[2*M*tk + t*64 + e]), top-k of p + bias,
+//   weights p / sum(p); writes r[t*tk + j] = expert, r[M*tk + t*tk + j] = weight bits, and counts experts in shared.
+// hyb=1: mixed tile heights; per expert full bm-row (64) tiles go to gt and a tail of <= bm2 (32) rows to gt2, so an
+//   expert with 33..64 rows is one 64-row tile (weights dequantized once) instead of two 32-row tiles.
+// Phase 2 (as pf_moesort): prefix offsets, g = [src token | inverse pos], tile tables gt (bm rows) and gt2 (bm2 rows).
+layout(local_size_x = 1024) in;
+layout(std430, binding = 0) coherent buffer R { uint r[]; };
+layout(std430, binding = 1) buffer G { uint g[]; };
+layout(std430, binding = 2) buffer T { uint gt[]; };
+layout(std430, binding = 3) buffer T2 { uint gt2[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint M; uint tk; uint n_exp; uint bm; uint bm2; uint b_off; uint hyb; } pc;
+shared uint cnt[64]; shared uint st[64]; shared uint fill[64]; shared float bias[64];
+void main() {
+    const uint t = gl_LocalInvocationID.x, l = gl_SubgroupInvocationID, wv = gl_SubgroupID, nw = gl_NumSubgroups, nk = pc.M * pc.tk;
+    if (t < 64u) { cnt[t] = 0u; bias[t] = t < pc.n_exp ? f32w[pc.b_off + t] : 0.0; }
+    barrier();
+    bool h0 = l < pc.n_exp, h1 = l + 32u < pc.n_exp;
+    for (uint tok = wv; tok < pc.M; tok += nw) {
+        uint lb = 2u * nk + tok * 64u;
+        float p0 = h0 ? 1.0 / (1.0 + exp(-uintBitsToFloat(r[lb + l]))) : 0.0, p1 = h1 ? 1.0 / (1.0 + exp(-uintBitsToFloat(r[lb + l + 32u]))) : 0.0;
+        float v0 = h0 ? p0 + bias[l] : -3.4e38, v1 = h1 ? p1 + bias[l + 32u] : -3.4e38;
+        float tot = 0.0; uint ids[8]; float ws[8];
+        for (uint j = 0u; j < pc.tk; j++) {
+            float m = subgroupMax(max(v0, v1));
+            uint idx = subgroupMin(v0 == m ? l : (v1 == m ? l + 32u : 0xFFFFu));
+            float wv2 = subgroupMax((idx == l) ? p0 : ((idx == l + 32u) ? p1 : -1.0));
+            ids[j] = idx; ws[j] = wv2; tot += wv2;
+            if (idx == l) v0 = -3.4e38; if (idx == l + 32u) v1 = -3.4e38;
+        }
+        tot = max(tot, 6.103515625e-5);
+        if (l < pc.tk) { uint j = l, id = 0u; float wj = 0.0;
+            for (uint i = 0u; i < pc.tk; i++) if (i == j) { id = ids[i]; wj = ws[i]; }
+            r[tok * pc.tk + j] = id; r[nk + tok * pc.tk + j] = floatBitsToUint(wj / tot); atomicAdd(cnt[id], 1u); }
+    }
+    barrier();
+    if (t == 0u) { uint a = 0u; for (uint e = 0u; e < pc.n_exp; e++) { st[e] = a; fill[e] = a; a += cnt[e]; } }
+    memoryBarrierBuffer(); barrier();
+    for (uint q = t; q < nk; q += 1024u) { uint j = atomicAdd(fill[r[q]], 1u); g[j] = q / pc.tk; g[nk + q] = j; }
+    if (pc.hyb != 0u) {
+        if (t == 0u) { uint n = 0u, n2 = 0u;
+            for (uint e = 0u; e < pc.n_exp; e++) for (uint m = 0u; m < cnt[e]; ) { uint rem = cnt[e] - m;
+                if (rem > pc.bm2) { uint h = min(rem, pc.bm); gt[1u + 3u * n] = e; gt[2u + 3u * n] = st[e] + m; gt[3u + 3u * n] = st[e] + m + h; n++; m += h; }
+                else { gt2[1u + 3u * n2] = e; gt2[2u + 3u * n2] = st[e] + m; gt2[3u + 3u * n2] = st[e] + cnt[e]; n2++; m = cnt[e]; } }
+            gt[0] = n; gt2[0] = n2; }
+        return;
+    }
+    if (t == 0u) { uint n = 0u;
+        for (uint e = 0u; e < pc.n_exp; e++) for (uint m = 0u; m < cnt[e]; m += pc.bm) { gt[1u + 3u * n] = e; gt[2u + 3u * n] = st[e] + m; gt[3u + 3u * n] = st[e] + min(m + pc.bm, cnt[e]); n++; }
+        gt[0] = n; }
+    else if (t == 32u) { uint n = 0u;
+        for (uint e = 0u; e < pc.n_exp; e++) for (uint m = 0u; m < cnt[e]; m += pc.bm2) { gt2[1u + 3u * n] = e; gt2[2u + 3u * n] = st[e] + m; gt2[3u + 3u * n] = st[e] + min(m + pc.bm2, cnt[e]); n++; }
+        gt2[0] = n; }
+}

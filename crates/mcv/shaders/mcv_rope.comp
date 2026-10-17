@@ -1,0 +1,49 @@
+#version 450
+// mcv fork of rope_qkn: interleaved M-RoPE (qwen3-vl imrope, sections [11,11,10]) when au[mw+3] == 1,
+// positions t,h,w at au[mw..mw+2]; mode 2: text after an image, p = pos - au[mw] (all sections); the KV cache index stays au[pos_word] + col.
+// General per-head q/k RMSNorm + partial NeoX RoPE (first n_rot dims, pairs (i, i+n_rot/2)) + f16 KV store.
+// Head dim D = workgroup size (spec constant 0). q head h at q_stride*h; k head at k_base + D*kh; v at v_base + D*kh.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint D = 256u;
+layout(std430, binding = 0) buffer Q { float qkv[]; };
+layout(std430, binding = 1) buffer KC { float16_t kc[]; };
+layout(std430, binding = 2) buffer VC { float16_t vc[]; };
+layout(std430, binding = 3) readonly buffer AU { uint au[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; float theta; uint qn; uint kn; float eps; uint q_stride; uint k_base; uint v_base; uint n_rot; uint pos_word; uint q_base; uint col; uint mw; } pc;
+shared float red[16]; shared float xs[D];
+void main() {
+    uint h = gl_WorkGroupID.x, i = gl_LocalInvocationID.x, pos = au[pc.pos_word] + pc.col;
+    bool isq = h < pc.n_head; uint kh = h - pc.n_head;
+    uint o = isq ? pc.q_base + h * pc.q_stride : pc.k_base + kh * D;
+    float v = qkv[o + i];
+    float ss = subgroupAdd(v * v);
+    if (subgroupElect()) red[gl_SubgroupID] = ss;
+    barrier();
+    float tot = 0.0; for (uint s = 0u; s < gl_NumSubgroups; s++) tot += red[s];
+    float xn = v * inversesqrt(tot / float(D) + pc.eps) * f32w[(isq ? pc.qn : pc.kn) + i];
+    xs[i] = xn;
+    barrier();
+    float r = xn;
+    uint half_ = pc.n_rot / 2u;
+    if (i < pc.n_rot) {
+        uint j = i % half_;
+        uint p = pos;
+        uint md = au[pc.mw + 3u];
+        if (md == 1u) { p = (j % 3u == 1u && j < 33u) ? au[pc.mw + 1u] : ((j % 3u == 2u && j < 30u) ? au[pc.mw + 2u] : au[pc.mw]); }
+        else if (md == 2u) { p = pos - au[pc.mw]; }
+        float a = float(p) * pow(pc.theta, -float(2u * j) / float(pc.n_rot));
+        float c = cos(a), s = sin(a);
+        r = i < half_ ? xs[i] * c - xs[i + half_] * s : xs[i - half_] * s + xs[i] * c;
+    }
+    if (isq) { qkv[o + i] = r; }
+    else {
+        uint co = pc.cache_off + pos * pc.n_kv * D + kh * D;
+        kc[co + i] = float16_t(r);
+        vc[co + i] = float16_t(qkv[pc.v_base + kh * D + i]);
+    }
+}

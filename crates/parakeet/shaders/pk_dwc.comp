@@ -1,0 +1,21 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+// Conformer conv module middle: Y = pointwise_conv1 output [T][2C]; g = GLU(Y) = Y[:, :C] * sigmoid(Y[:, C:]);
+// depthwise conv (kernel KW, same padding, zeros outside [0,T)) -> BatchNorm (eval) -> SiLU -> f16 A[t*lda + c].
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Y { float y[]; };
+layout(std430, binding = 1) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 2) readonly buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint T; uint C; uint KW; uint w_off; uint m_off; uint v_off; uint g_off; uint b_off; float eps; uint lda; } pc;
+void main() {
+    uint i = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 256u + gl_LocalInvocationID.x;
+    if (i >= pc.T * pc.C) return;
+    uint t = i / pc.C, c = i - t * pc.C; int pad = int(pc.KW - 1u) / 2;
+    float s = 0.0;
+    for (uint k = 0u; k < pc.KW; k++) { int tt = int(t) + int(k) - pad; if (tt < 0 || tt >= int(pc.T)) continue;
+        uint r = uint(tt) * 2u * pc.C; float g = y[r + c] / (1.0 + exp(-y[r + pc.C + c]));
+        s += g * pr[pc.w_off + c * pc.KW + k]; }
+    float z = (s - pr[pc.m_off + c]) * inversesqrt(pr[pc.v_off + c] + pc.eps) * pr[pc.g_off + c] + pr[pc.b_off + c];
+    a[t * pc.lda + c] = float16_t(z / (1.0 + exp(-z)));
+}

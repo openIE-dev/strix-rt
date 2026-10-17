@@ -1,0 +1,49 @@
+#version 450
+// Gated DeltaNet recurrent step (decode), one workgroup per value head h (Dk = Dv = 128), state S[h][i][j] f32
+// (i = value row, j = key col). k/q come from key head h % nk (llama.cpp tiling). Per row i:
+//   S_i *= exp(g);  d_i = (v_i - S_i.k) * beta;  S_i += d_i * k;  o_i = S_i.q
+// g = softplus(alpha + dt_bias[h]) * a[h]  (a = -exp(A_log), stored), beta = sigmoid(beta_lin).
+// Then the gated RMSNorm: y = rmsnorm(o) * norm_w * silu(z).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 512) in;
+layout(std430, binding = 0) readonly buffer CV { vec4 cv4[]; };     // conv out: q (nk*128, scaled) | k (nk*128) | v (nv*128)
+layout(std430, binding = 0) readonly buffer CVF { float cvf[]; };
+layout(std430, binding = 1) readonly buffer PR { float pr[]; };      // projection out: [qkv | z | alpha | beta]
+layout(std430, binding = 2) buffer S { vec4 s4[]; };
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint nk; uint nv; uint s_off4; uint z_off; uint a_off; uint b_off; uint dt_off; uint A_off; uint nw_off; float eps; uint cv_off4; uint y_off; } pc;
+shared float os[128];
+shared float red[16];
+void main() {
+    uint h = gl_WorkGroupID.x, lane = gl_SubgroupInvocationID, sgid = gl_SubgroupID, nsg = gl_NumSubgroups;
+    uint kh = h % pc.nk;
+    vec4 q = cv4[pc.cv_off4 + kh * 32u + lane], k = cv4[pc.cv_off4 + pc.nk * 32u + kh * 32u + lane];
+    float al = pr[pc.a_off + h] + f32w[pc.dt_off + h];
+    float sp = al > 20.0 ? al : log(1.0 + exp(al));
+    float decay = exp(sp * f32w[pc.A_off + h]);
+    float beta = 1.0 / (1.0 + exp(-pr[pc.b_off + h]));
+    uint vb = pc.cv_off4 * 4u + 2u * pc.nk * 128u + h * 128u;
+    for (uint i = sgid; i < 128u; i += nsg) {
+        uint si = pc.s_off4 + (h * 128u + i) * 32u + lane;
+        vec4 s = s4[si] * decay;
+        float sk = subgroupAdd(dot(s, k));
+        float d = (cvf[vb + i] - sk) * beta;
+        s += d * k;
+        s4[si] = s;
+        float oi = subgroupAdd(dot(s, q));
+        if (subgroupElect()) os[i] = oi;
+    }
+    barrier();
+    uint t = gl_LocalInvocationID.x;
+    float v = t < 128u ? os[t] : 0.0;
+    float ss = subgroupAdd(v * v);
+    if (subgroupElect()) red[sgid] = ss;
+    barrier();
+    if (t < 128u) {
+        float tot = 0.0; for (uint s2 = 0u; s2 < nsg; s2++) tot += red[s2];
+        float z = pr[pc.z_off + h * 128u + t];
+        y[pc.y_off + h * 128u + t] = v * inversesqrt(tot / 128.0 + pc.eps) * f32w[pc.nw_off + t] * (z / (1.0 + exp(-z)));
+    }
+}

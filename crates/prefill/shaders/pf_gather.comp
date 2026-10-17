@@ -1,0 +1,19 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+// MoE gather: G[j][0..W) = A[src[j]][0..W) (u32 words of f16 pairs); src = g[0..n).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer A { uint a[]; };
+layout(std430, binding = 1) writeonly buffer G { uint gg[]; };
+layout(std430, binding = 2) readonly buffer I { uint g[]; };
+layout(push_constant) uniform PC { uint W; uint lda; uint ldg; uint n; } pc;
+void main() {
+    uint idx = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 256u + gl_LocalInvocationID.x;
+    if (idx >= pc.W * pc.n) return;
+    uint j = idx / pc.W, i = idx - j * pc.W;
+    gg[j * pc.ldg + i] = a[g[j] * pc.lda + i];
+}

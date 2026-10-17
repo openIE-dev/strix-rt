@@ -1,0 +1,57 @@
+#version 450
+// Decode GEMV y[N] = W[N,K] (Q4_K) * x[K] (f32).
+// One workgroup per NR rows; each invocation handles one (block, 64-value pair) item:
+// 32 bytes of qs + scales -> 64 weights. Reduction via subgroupAdd + shared mem.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x_id = 0) in;
+layout(constant_id = 1) const uint NR = 1;
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 1) readonly buffer X { vec4 x[]; };
+layout(std430, binding = 2) writeonly buffer Y { float y[]; };
+layout(push_constant) uniform PC { uint N; uint K; uint w_off; } pc;
+shared float red[32];
+uint byte_of(uvec3 s, uint i) { uint u = i < 4u ? s.x : (i < 8u ? s.y : s.z); return (u >> (8u * (i & 3u))) & 0xFFu; }
+void main() {
+    uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint nb = pc.K / 256u;
+    uint nitems = nb * 4u;
+    for (uint r = 0u; r < NR; r++) {
+        uint row = wg * NR + r;
+        if (row >= pc.N) return;
+        float acc = 0.0;
+        for (uint it = gl_LocalInvocationID.x; it < nitems; it += gl_WorkGroupSize.x) {
+            uint b = it >> 2u, j = it & 3u;
+            uint base = pc.w_off + (row * nb + b) * 36u;
+            vec2 dm = unpackHalf2x16(w[base]);
+            uvec3 s = uvec3(w[base + 1u], w[base + 2u], w[base + 3u]);
+            uint i0 = 2u * j, i1 = i0 + 1u;
+            uint sc0, m0, sc1, m1;
+            if (j < 2u) {
+                sc0 = byte_of(s, i0) & 63u; m0 = byte_of(s, i0 + 4u) & 63u;
+                sc1 = byte_of(s, i1) & 63u; m1 = byte_of(s, i1 + 4u) & 63u;
+            } else {
+                sc0 = (byte_of(s, i0 + 4u) & 0xFu) | ((byte_of(s, i0 - 4u) >> 6) << 4); m0 = (byte_of(s, i0 + 4u) >> 4) | ((byte_of(s, i0) >> 6) << 4);
+                sc1 = (byte_of(s, i1 + 4u) & 0xFu) | ((byte_of(s, i1 - 4u) >> 6) << 4); m1 = (byte_of(s, i1 + 4u) >> 4) | ((byte_of(s, i1) >> 6) << 4);
+            }
+            uint qb = base + 4u + j * 8u;
+            uint xb = (b * 256u + j * 64u) >> 2u;
+            float s0 = 0.0, s1 = 0.0, sx0 = 0.0, sx1 = 0.0;
+            [[unroll]] for (uint k = 0u; k < 8u; k++) {
+                uint q = w[qb + k];
+                vec4 lo = vec4(uvec4(q, q >> 8, q >> 16, q >> 24) & 0xFu);
+                vec4 hi = vec4(uvec4(q >> 4, q >> 12, q >> 20, q >> 28) & 0xFu);
+                vec4 xa = x[xb + k], xh = x[xb + 8u + k];
+                s0 += dot(lo, xa); sx0 += dot(xa, vec4(1.0));
+                s1 += dot(hi, xh); sx1 += dot(xh, vec4(1.0));
+            }
+            acc += dm.x * (float(sc0) * s0 + float(sc1) * s1) - dm.y * (float(m0) * sx0 + float(m1) * sx1);
+        }
+        acc = subgroupAdd(acc);
+        if (gl_NumSubgroups == 1u) { if (gl_LocalInvocationID.x == 0u) y[row] = acc; continue; }
+        if (gl_SubgroupInvocationID == 0u) red[gl_SubgroupID] = acc;
+        barrier();
+        if (gl_LocalInvocationID.x == 0u) { float t = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) t += red[i]; y[row] = t; }
+        barrier();
+    }
+}

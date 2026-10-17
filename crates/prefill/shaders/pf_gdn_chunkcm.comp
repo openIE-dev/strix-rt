@@ -1,0 +1,111 @@
+#version 450
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_control_flow_attributes : require
+// Chunked Gated DeltaNet scan with cooperative-matrix GEMMs (chunk C = 16), same bindings as pf_gdn_chunk
+// (state-independent lg/beta/A/P from pf_gdn_chunkp at binding 5). One workgroup per head, 4 waves x 32 value rows.
+// The 128x128 f32 state lives in accumulator tiles; per chunk and 16-row tile:
+//   [a|b] = S0 [K;Q]^T  (S0 split hi+lo f16 so the products keep ~f32 accuracy)
+//   per row: (I + A) v' = beta (v - e^lg a), o = e^lg b + P v'
+//   S = e^lg_C S0 + Vd K, Vd[r][s] = e^(lg_C - lg_s) v'_s[r]  (Vd split hi+lo f16)
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint WG = 128u;   // 32 x waves per workgroup; 128 / WG workgroups per head
+const uint NW = WG / 32u;
+const uint C = 16u, LK = 136u, LV = 24u;
+layout(std430, binding = 0) readonly buffer CV { float cv[]; };
+layout(std430, binding = 1) readonly buffer PR { float pr[]; };
+layout(std430, binding = 2) buffer S { float sw[]; };
+layout(std430, binding = 3) writeonly buffer O { float o[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(std430, binding = 5) readonly buffer X { float xw[]; };
+layout(push_constant) uniform PC { uint nk; uint nv; uint s_off4; uint a_off; uint b_off; uint dt_off; uint A_off; uint ldp; uint ldc; uint M; } pc;
+#define ACC coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>
+#define ACH coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>
+#define MA coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA>
+#define MB coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>
+shared float16_t Kh[C * LK]; shared float16_t Qh[C * LK];
+shared float16_t Ss[NW][2][16 * LK];
+shared float Cab[NW][16 * 33];
+shared float Am[C][C + 1u]; shared float Pm[C][C + 1u]; shared float lg[C]; shared float bet[C]; shared float eg[C]; shared float ed[C]; shared float Vs[C][128];
+void sbar() { memoryBarrierShared(); subgroupBarrier(); }
+void main() {
+    uint gph = 128u / WG, h = gl_WorkGroupID.x / gph, lid = gl_LocalInvocationID.x, w = lid >> 5u, l = lid & 31u, kh = h % pc.nk;
+    uint wr = (gl_WorkGroupID.x % gph) * NW + w;   // 32-row block of the head owned by this wave
+    uint sbase = pc.s_off4 * 4u + h * 128u * 128u;
+    ACC st[2][8];
+    [[unroll]] for (uint rt = 0u; rt < 2u; rt++) [[unroll]] for (uint kt = 0u; kt < 8u; kt++)
+        coopMatLoad(st[rt][kt], sw, sbase + (wr * 32u + rt * 16u) * 128u + kt * 16u, 128u, gl_CooperativeMatrixLayoutRowMajor);
+    uint nch = (pc.M + C - 1u) / C;
+    for (uint t0 = 0u; t0 < pc.M; t0 += C) {
+        uint n = min(C, pc.M - t0);
+        barrier();
+        for (uint x = lid; x < C * 128u; x += WG) {
+            uint tt = x >> 7u, j = x & 127u, cb = (t0 + tt) * pc.ldc;
+            bool ok = tt < n;
+            Qh[tt * LK + j] = float16_t(ok ? cv[cb + kh * 128u + j] : 0.0);
+            Kh[tt * LK + j] = float16_t(ok ? cv[cb + pc.nk * 128u + kh * 128u + j] : 0.0);
+            Vs[tt][j] = ok ? cv[cb + 2u * pc.nk * 128u + h * 128u + j] : 0.0;
+        }
+        uint xb = (h * nch + t0 / C) * (2u * C + 2u * C * C);
+        if (lid < C) { lg[lid] = lid < n ? xw[xb + lid] : 0.0; bet[lid] = lid < n ? xw[xb + C + lid] : 0.0; }
+        for (uint x = lid; x < C * C; x += WG) { uint t = x / C, u = x % C; bool ok = u <= t && t < n; Am[t][u] = ok ? xw[xb + 2u * C + x] : 0.0; Pm[t][u] = ok ? xw[xb + 2u * C + C * C + x] : 0.0; }
+        barrier();
+        float lc = lg[n - 1u], gc = exp(lc);
+        if (lid < C) { eg[lid] = exp(lg[lid]); ed[lid] = lid < n ? exp(lc - lg[lid]) : 0.0; }
+        barrier();
+        [[unroll]] for (uint rt = 0u; rt < 2u; rt++) {
+            [[unroll]] for (uint kt = 0u; kt < 8u; kt++) {
+                ACH hi = ACH(st[rt][kt]); ACH lo = ACH(st[rt][kt] - ACC(hi));
+                coopMatStore(hi, Ss[w][0], kt * 16u, LK, gl_CooperativeMatrixLayoutRowMajor);
+                coopMatStore(lo, Ss[w][1], kt * 16u, LK, gl_CooperativeMatrixLayoutRowMajor);
+            }
+            sbar();
+            ACC ca = ACC(0.0), cq = ACC(0.0);
+            [[unroll]] for (uint kt = 0u; kt < 8u; kt++) {
+                MA ah, al; MB bk, bq;
+                coopMatLoad(ah, Ss[w][0], kt * 16u, LK, gl_CooperativeMatrixLayoutRowMajor);
+                coopMatLoad(al, Ss[w][1], kt * 16u, LK, gl_CooperativeMatrixLayoutRowMajor);
+                coopMatLoad(bk, Kh, kt * 16u, LK, gl_CooperativeMatrixLayoutColumnMajor);
+                coopMatLoad(bq, Qh, kt * 16u, LK, gl_CooperativeMatrixLayoutColumnMajor);
+                ca = coopMatMulAdd(ah, bk, ca); ca = coopMatMulAdd(al, bk, ca);
+                cq = coopMatMulAdd(ah, bq, cq); cq = coopMatMulAdd(al, bq, cq);
+            }
+            coopMatStore(ca, Cab[w], 0u, 33u, gl_CooperativeMatrixLayoutRowMajor);
+            coopMatStore(cq, Cab[w], 16u, 33u, gl_CooperativeMatrixLayoutRowMajor);
+            sbar();
+            if (l < 16u) {
+                uint r = wr * 32u + rt * 16u + l;
+                float vp[C];
+                [[unroll]] for (uint t = 0u; t < C; t++) {
+                    float x = bet[t] * (Vs[t][r] - eg[t] * Cab[w][l * 33u + t]);
+                    [[unroll]] for (uint u = 0u; u < t; u++) x -= Am[t][u] * vp[u];
+                    vp[t] = t < n ? x : 0.0;
+                }
+                [[unroll]] for (uint t = 0u; t < C; t++) if (t < n) {
+                    float x = eg[t] * Cab[w][l * 33u + 16u + t];
+                    [[unroll]] for (uint u = 0u; u <= t; u++) x += Pm[t][u] * vp[u];
+                    o[(t0 + t) * pc.nv * 128u + h * 128u + r] = x;
+                }
+                [[unroll]] for (uint t = 0u; t < C; t++) {
+                    float d = ed[t] * vp[t];
+                    float16_t dh = float16_t(d);
+                    Ss[w][0][l * LV + t] = dh; Ss[w][1][l * LV + t] = float16_t(d - float(dh));
+                }
+            }
+            sbar();
+            MA vh, vl;
+            coopMatLoad(vh, Ss[w][0], 0u, LV, gl_CooperativeMatrixLayoutRowMajor);
+            coopMatLoad(vl, Ss[w][1], 0u, LV, gl_CooperativeMatrixLayoutRowMajor);
+            [[unroll]] for (uint kt = 0u; kt < 8u; kt++) {
+                MB bk; coopMatLoad(bk, Kh, kt * 16u, LK, gl_CooperativeMatrixLayoutRowMajor);
+                ACC a = st[rt][kt] * gc;
+                a = coopMatMulAdd(vh, bk, a); st[rt][kt] = coopMatMulAdd(vl, bk, a);
+            }
+            sbar();
+        }
+    }
+    [[unroll]] for (uint rt = 0u; rt < 2u; rt++) [[unroll]] for (uint kt = 0u; kt < 8u; kt++)
+        coopMatStore(st[rt][kt], sw, sbase + (wr * 32u + rt * 16u) * 128u + kt * 16u, 128u, gl_CooperativeMatrixLayoutRowMajor);
+}

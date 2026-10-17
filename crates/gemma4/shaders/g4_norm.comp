@@ -1,0 +1,33 @@
+#version 450
+// Gemma 4 RMSNorm (one workgroup per column y, K <= 16384).
+//   mode 0: out = in * rsqrt(mean(in^2)+eps) * w
+//   mode 1: out = (out + in * rsqrt(mean(in^2)+eps) * w) * s   (post-norm + residual; s = f32w[s_off] or 1)
+//   mode 2: as 0 without weight
+// key_word != 0 zeroes the argmax key au[key], au[key+1].
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x_id = 0) in;   // default 1024; G4_NORM_WG overrides
+layout(std430, binding = 0) readonly buffer I { float xin[]; };
+layout(std430, binding = 1) buffer O { float xo[]; };
+layout(std430, binding = 2) buffer AU { uint au[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint K; uint w_off; float eps; uint mode; uint s_off; uint key_word; uint in_cs; uint out_cs; } pc;
+shared float red[64];
+void main() {
+    uint t = gl_LocalInvocationID.x, io = gl_WorkGroupID.y * pc.in_cs, oo = gl_WorkGroupID.y * pc.out_cs;
+    float ss = 0.0;
+    for (uint i = t; i < pc.K; i += gl_WorkGroupSize.x) { float v = xin[io + i]; ss += v * v; }
+    ss = subgroupAdd(ss);
+    if (subgroupElect()) red[gl_SubgroupID] = ss;
+    barrier();
+    float tot = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) tot += red[i];
+    float sc = inversesqrt(tot / float(pc.K) + pc.eps);
+    float s = pc.s_off != 0xFFFFFFFFu ? f32w[pc.s_off] : 1.0;
+    for (uint i = t; i < pc.K; i += gl_WorkGroupSize.x) {
+        float v = xin[io + i] * sc;
+        if (pc.mode == 0u) xo[oo + i] = v * f32w[pc.w_off + i];
+        else if (pc.mode == 1u) xo[oo + i] = (xo[oo + i] + v * f32w[pc.w_off + i]) * s;
+        else xo[oo + i] = v;
+    }
+    if (t == 0u && pc.key_word != 0u) { au[pc.key_word] = 0u; au[pc.key_word + 1u] = 0u; }
+}

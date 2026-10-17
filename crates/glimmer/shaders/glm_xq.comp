@@ -1,0 +1,29 @@
+#version 450
+// Activation quantisation for the integer-dot GEMV (llama.cpp MMVQ style): x f32 [K] -> per 32-block int8 + scales.
+// xq words: [0, K/4) packed int8 (item it at it*8..), [K/4, +K/32) d (f32 bits), then xs = d * sum(q), then per-16 sums of q (f32) [K/16].
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) buffer XQ { uint xq[]; };
+layout(push_constant) uniform PC { uint K; uint x_off; } pc;
+void main() {
+    uint it = gl_GlobalInvocationID.x, ni = pc.K / 32u;
+    if (it >= ni) return;
+    float v[32]; float amax = 0.0;
+    for (uint i = 0u; i < 32u; i++) { v[i] = x[pc.x_off + it * 32u + i]; amax = max(amax, abs(v[i])); }
+    float d = amax / 127.0, id = amax > 0.0 ? 127.0 / amax : 0.0;
+    int s0 = 0, s1 = 0;
+    for (uint k = 0u; k < 8u; k++) {
+        uint wv = 0u;
+        for (uint j = 0u; j < 4u; j++) {
+            int q = clamp(int(roundEven(v[4u * k + j] * id)), -127, 127);
+            if (k < 4u) s0 += q; else s1 += q;
+            wv |= (uint(q) & 255u) << (8u * j);
+        }
+        xq[it * 8u + k] = wv;
+    }
+    uint o = pc.K / 4u;
+    xq[o + it] = floatBitsToUint(d);
+    xq[o + ni + it] = floatBitsToUint(d * float(s0 + s1));
+    xq[o + 2u * ni + 2u * it] = floatBitsToUint(float(s0));
+    xq[o + 2u * ni + 2u * it + 1u] = floatBitsToUint(float(s1));
+}

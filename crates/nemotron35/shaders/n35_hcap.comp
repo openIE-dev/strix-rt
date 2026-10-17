@@ -1,0 +1,19 @@
+#version 450
+// RMSNorm each row of X (final hidden of a prefill chunk) with output_norm and store f32 at seed row dst_row0+t. One workgroup per row.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer S { float s[]; };
+layout(std430, binding = 2) readonly buffer F { float f[]; };
+layout(push_constant) uniform PC { uint n; uint w_off; float eps; uint dst_row0; } pc;
+shared float red[8];
+void main() {
+    uint t = gl_WorkGroupID.x, i0 = gl_LocalInvocationID.x, xb = t * pc.n, sb = (pc.dst_row0 + t) * pc.n;
+    float ss = 0.0; for (uint i = i0; i < pc.n; i += 256u) { float v = x[xb + i]; ss += v * v; }
+    ss = subgroupAdd(ss); if (subgroupElect()) red[gl_SubgroupID] = ss;
+    barrier();
+    float tot = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) tot += red[i];
+    float r = inversesqrt(tot / float(pc.n) + pc.eps);
+    for (uint i = i0; i < pc.n; i += 256u) s[sb + i] = x[xb + i] * r * f[pc.w_off + i];
+}

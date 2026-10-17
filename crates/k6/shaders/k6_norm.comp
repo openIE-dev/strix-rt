@@ -1,0 +1,36 @@
+#version 450
+// Row LayerNorms (one workgroup per row, D <= 4096), eps in push:
+//  mode 0: A[t*lda+i] = f16(LN(x) * (1 + M[s_off+i]) + M[h_off+i])          (AdaLN scale/shift, no affine)
+//  mode 1: O[t*lda+i] = LN(x) * P[s_off+i] + P[h_off+i]   (f32 out, affine)  (text/audio embedding norm)
+//  mode 2: A[t*lda+i] = f16(LN(LN(x) * (1 + M[s_off+i]) + M[h_off+i]))      (audio out layer: modulated norm, then norm)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 2) writeonly buffer O { float o[]; };
+layout(std430, binding = 3) readonly buffer M { float md[]; };
+layout(push_constant) uniform PC { uint D; uint ldx; uint lda; uint s_off; uint h_off; uint mode; float eps; uint pad; } pc;
+shared float red[16];
+float wsum(float v) { v = subgroupAdd(v); if (subgroupElect()) red[gl_SubgroupID] = v; barrier();
+    float s = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) s += red[i]; barrier(); return s; }
+void main() {
+    uint t = gl_WorkGroupID.x, i0 = gl_LocalInvocationID.x, xb = t * pc.ldx;
+    float v[16]; float s = 0.0;
+    for (uint c = 0u; c < 16u; c++) { uint i = i0 + c * 256u; v[c] = i < pc.D ? x[xb + i] : 0.0; s += v[c]; }
+    float mean = wsum(s) / float(pc.D); float d2 = 0.0;
+    for (uint c = 0u; c < 16u; c++) { uint i = i0 + c * 256u; if (i < pc.D) { v[c] -= mean; d2 += v[c] * v[c]; } }
+    float r = inversesqrt(wsum(d2) / float(pc.D) + pc.eps);
+    if (pc.mode == 1u) { for (uint c = 0u; c < 16u; c++) { uint i = i0 + c * 256u; if (i >= pc.D) break; o[t * pc.lda + i] = v[c] * r * md[pc.s_off + i] + md[pc.h_off + i]; } return; }
+    for (uint c = 0u; c < 16u; c++) { uint i = i0 + c * 256u; if (i < pc.D) v[c] = v[c] * r * (1.0 + md[pc.s_off + i]) + md[pc.h_off + i]; }
+    if (pc.mode == 2u) {
+        s = 0.0; for (uint c = 0u; c < 16u; c++) { uint i = i0 + c * 256u; if (i < pc.D) s += v[c]; }
+        mean = wsum(s) / float(pc.D); d2 = 0.0;
+        for (uint c = 0u; c < 16u; c++) { uint i = i0 + c * 256u; if (i < pc.D) { v[c] -= mean; d2 += v[c] * v[c]; } }
+        r = inversesqrt(wsum(d2) / float(pc.D) + pc.eps);
+        for (uint c = 0u; c < 16u; c++) v[c] *= r;
+    }
+    for (uint c = 0u; c < 16u; c++) { uint i = i0 + c * 256u; if (i >= pc.D) break; a[t * pc.lda + i] = float16_t(v[c]); }
+}

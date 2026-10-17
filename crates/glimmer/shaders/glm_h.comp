@@ -1,0 +1,21 @@
+#version 450
+// Glimmer prefill: f32 rows -> f16 GEMM input A[t * lda + i], i < K, t = workgroup y.
+//   mode 0: a = x[t*xcs + i] * f
+//   mode 1: a = silu(x[t*xcs + i]) * x[t*xcs + K + i]                 (SwiGLU, gate | up halves)
+//   mode 4: a = x[t*xcs + i] * sigmoid(b[b_off + t*bcs + i])          (attention output gate)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer B { float b[]; };
+layout(std430, binding = 2) writeonly buffer A { float16_t a[]; };
+layout(push_constant) uniform PC { uint K; uint lda; uint xcs; uint mode; float f; uint b_off; uint bcs; } pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x, t = gl_WorkGroupID.y;
+    if (i >= pc.K) return;
+    uint xi = t * pc.xcs + i; float r, v = x[xi];
+    if (pc.mode == 0u) r = v * pc.f;
+    else if (pc.mode == 1u) r = v / (1.0 + exp(-v)) * x[xi + pc.K];
+    else r = v / (1.0 + exp(-b[pc.b_off + t * pc.bcs + i]));
+    a[t * pc.lda + i] = float16_t(r);
+}

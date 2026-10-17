@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+// LFM2 double-gated short conv over M tokens, one thread per (t, channel). bcx row = [B | C | X], bx = B*X.
+// y[t] = C[t] * (w0*bx[t-2] + w1*bx[t-1] + w2*bx[t]) with bx[-1], bx[-2] from the state (decode layout: s0 = t-2, s1 = t-1).
+// The FIR has no output recurrence, so all t run in parallel; the new state (last two bx) goes to st2.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer BCX { float bcx[]; };
+layout(std430, binding = 1) buffer ST { float st[]; };
+layout(std430, binding = 2) writeonly buffer Y { float16_t y[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint dim; uint st_off; uint w_off; uint M; uint ldb; uint lda; } pc;
+float bx(uint t, uint c) { uint b = t * pc.ldb; return bcx[b + c] * bcx[b + 2u * pc.dim + c]; }
+void main() {
+    uint idx = (gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x) * 256u + gl_LocalInvocationID.x;
+    if (idx >= pc.dim * pc.M) return;
+    uint t = idx / pc.dim, c = idx - t * pc.dim, so = pc.st_off + 2u * c, wo = pc.w_off + 3u * c;
+    float b2 = bx(t, c);
+    float b1 = t >= 1u ? bx(t - 1u, c) : st[so + 1u];
+    float b0 = t >= 2u ? bx(t - 2u, c) : (t == 1u ? st[so + 1u] : st[so]);
+    y[t * pc.lda + c] = float16_t(bcx[t * pc.ldb + pc.dim + c] * (f32w[wo] * b0 + f32w[wo + 1u] * b1 + f32w[wo + 2u] * b2));
+}

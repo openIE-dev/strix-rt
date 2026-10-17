@@ -1,0 +1,33 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+// mode 0: layer_norm over last dim D; mode 1: softmax over last dim. Rows addressed as (outer, inner) with strides; output contiguous.
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer A { float m[]; };
+layout(push_constant) uniform P { uint D, R1, mode; float eps; uint x_off; int st_o, st_i, st_d; uint w_off, b_off, o_off; uint epi, mk_off, b2_off; } p;
+shared float red[64];
+float wsum(float v) { v = subgroupAdd(v); if (subgroupElect()) red[gl_SubgroupID] = v; barrier(); float r = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) r += red[i]; barrier(); return r; }
+float wmax(float v) { v = subgroupMax(v); if (subgroupElect()) red[gl_SubgroupID] = v; barrier(); float r = -1e38; for (uint i = 0u; i < gl_NumSubgroups; i++) r = max(r, red[i]); barrier(); return r; }
+void main() {
+    uint row = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x; uint t = gl_LocalInvocationID.x;
+    int xb = int(p.x_off) + int(row / p.R1) * p.st_o + int(row % p.R1) * p.st_i; uint ob = p.o_off + row * p.D;
+    if (p.mode == 0u) {
+        float s = 0.0; for (uint d = t; d < p.D; d += 256u) s += m[xb + int(d) * p.st_d];
+        float mean = wsum(s) / float(p.D);
+        float v = 0.0; for (uint d = t; d < p.D; d += 256u) { float x = m[xb + int(d) * p.st_d] - mean; v += x * x; }
+        float is = inversesqrt(wsum(v) / float(p.D) + p.eps);
+        for (uint d = t; d < p.D; d += 256u) { float x = (m[xb + int(d) * p.st_d] - mean) * is;
+            if (p.w_off != 0xffffffffu) x *= m[p.w_off + d]; if (p.b_off != 0xffffffffu) x += m[p.b_off + d];
+            if (p.epi == 0u) { m[ob + d] = x; continue; }
+            // fused: transpose(1,2) -> mish -> * mask[inner] [-> + bias[d] -> * mask[inner]]; output [outer, D, R1]
+            uint inner = row % p.R1, outer = row / p.R1; float mk = m[p.mk_off + inner];
+            x = x * tanh(log(1.0 + exp(min(x, 20.0)))); if (x != x) x = 0.0; x *= mk;
+            if ((p.epi & 2u) != 0u) x = (x + m[p.b2_off + d]) * mk;
+            m[p.o_off + (outer * p.D + d) * p.R1 + inner] = x; }
+    } else {
+        float mx = -1e38; for (uint d = t; d < p.D; d += 256u) mx = max(mx, m[xb + int(d) * p.st_d]);
+        mx = wmax(mx);
+        float s = 0.0; for (uint d = t; d < p.D; d += 256u) s += exp(m[xb + int(d) * p.st_d] - mx);
+        float inv = 1.0 / wsum(s);
+        for (uint d = t; d < p.D; d += 256u) m[ob + d] = exp(m[xb + int(d) * p.st_d] - mx) * inv;
+    }
+}

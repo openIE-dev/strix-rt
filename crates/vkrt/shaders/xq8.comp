@@ -1,0 +1,22 @@
+#version 450
+// int8 activation quantization for the ternary gemvq path (flag 32): column j of x (K floats at x_off + j*x_cs) ->
+// per-128 blocks of packed int8 at aux word XQ_BASE + j*XQ_CS + b*32, (scale, sum of q) at XS_BASE + j*XS_CS + 2b.
+// Layout constants shared with gemvq.comp. One 32-lane workgroup per (block, column).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 32) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 1) buffer AU { uint au[]; };
+layout(std430, binding = 1) buffer AF { float af[]; };
+layout(push_constant) uniform PC { uint K; uint x_off; uint x_cs; } pc;
+const uint XQ_BASE = 16384u, XQ_CS = 4352u, XS_BASE = 34816u, XS_CS = 272u;
+void main() {
+    uint b = gl_WorkGroupID.x, j = gl_WorkGroupID.y, t = gl_LocalInvocationID.x;
+    uint e = pc.x_off + j * pc.x_cs + b * 128u + 4u * t;
+    vec4 v = vec4(x[e], x[e + 1u], x[e + 2u], x[e + 3u]);
+    float m = subgroupMax(max(max(abs(v.x), abs(v.y)), max(abs(v.z), abs(v.w))));
+    float sc = m / 127.0, inv = m > 0.0 ? 127.0 / m : 0.0;
+    ivec4 q = clamp(ivec4(round(v * inv)), ivec4(-127), ivec4(127));
+    au[XQ_BASE + j * XQ_CS + b * 32u + t] = uint(q.x & 255) | (uint(q.y & 255) << 8) | (uint(q.z & 255) << 16) | (uint(q.w & 255) << 24);
+    int s = subgroupAdd(q.x + q.y + q.z + q.w);
+    if (t == 0u) { af[XS_BASE + j * XS_CS + 2u * b] = sc; af[XS_BASE + j * XS_CS + 2u * b + 1u] = float(s); }
+}

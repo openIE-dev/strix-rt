@@ -1,0 +1,48 @@
+#version 450
+// Single-token GQA attention, head_dim 64, f16 KV cache, positions 0..au[160]. One workgroup (128 threads) per head.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer Q { float qkv[]; };
+layout(std430, binding = 1) readonly buffer KC { f16vec4 kc4[]; };
+layout(std430, binding = 2) readonly buffer VC { f16vec4 vc4[]; };
+layout(std430, binding = 3) writeonly buffer O { float o[]; };
+layout(std430, binding = 4) readonly buffer AU { uint au[]; };
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; uint max_ctx; } pc;
+shared vec4 qs[16];
+shared float sc[4096];
+shared float rm[8]; shared float rs[8];
+shared vec4 part[8][16];
+void main() {
+    uint h = gl_WorkGroupID.x, t = gl_LocalInvocationID.x;
+    uint kvh = h / (pc.n_head / pc.n_kv), n = au[160] + 1u, stride = pc.n_kv * 64u;
+    if (t < 16u) qs[t] = vec4(qkv[h * 64u + 4u * t], qkv[h * 64u + 4u * t + 1u], qkv[h * 64u + 4u * t + 2u], qkv[h * 64u + 4u * t + 3u]);
+    barrier();
+    float mx = -1e30;
+    for (uint p = t; p < n; p += 128u) {
+        uint b4 = (pc.cache_off + p * stride + kvh * 64u) >> 2;
+        float s = 0.0;
+        for (uint d = 0u; d < 16u; d++) s += dot(qs[d], vec4(kc4[b4 + d]));
+        s *= 0.125;
+        sc[p] = s; mx = max(mx, s);
+    }
+    mx = subgroupMax(mx);
+    if (subgroupElect()) rm[gl_SubgroupID] = mx;
+    barrier();
+    mx = rm[0]; for (uint i = 1u; i < gl_NumSubgroups; i++) mx = max(mx, rm[i]);
+    float sum = 0.0;
+    for (uint p = t; p < n; p += 128u) { float e = exp(sc[p] - mx); sc[p] = e; sum += e; }
+    sum = subgroupAdd(sum);
+    if (subgroupElect()) rs[gl_SubgroupID] = sum;
+    barrier();
+    sum = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) sum += rs[i];
+    uint grp = t >> 4, ln = t & 15u;
+    vec4 acc = vec4(0.0);
+    for (uint p = grp; p < n; p += 8u) acc += sc[p] * vec4(vc4[((pc.cache_off + p * stride + kvh * 64u) >> 2) + ln]);
+    part[grp][ln] = acc;
+    barrier();
+    if (t < 16u) { vec4 r = vec4(0.0); for (uint g = 0u; g < 8u; g++) r += part[g][t]; r /= sum;
+        o[h * 64u + 4u * t] = r.x; o[h * 64u + 4u * t + 1u] = r.y; o[h * 64u + 4u * t + 2u] = r.z; o[h * 64u + 4u * t + 3u] = r.w; }
+}

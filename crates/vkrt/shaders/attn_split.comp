@@ -1,0 +1,63 @@
+#version 450
+// Split-K (flash-decoding) single-token GQA attention over an f16 KV cache. Workgroup (head h, chunk c) handles
+// positions [c*len, min(n, (c+1)*len)) with len = ceil(n / NC), n = au[POS]+1, using an online softmax over tiles
+// of 128 positions; writes (m, l, o[D]) partials to scratch. attn_combine.comp merges the NC partials.
+// No per-position shared memory, so context length is bounded only by the KV cache allocation.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const uint D = 64u;           // head dim (multiple of 4, <= 512)
+layout(std430, binding = 0) readonly buffer Q { float qb[]; };
+layout(std430, binding = 1) readonly buffer KC { f16vec4 kc4[]; };
+layout(std430, binding = 2) readonly buffer VC { f16vec4 vc4[]; };
+layout(std430, binding = 3) writeonly buffer P { float part[]; };   // [h][c][2 + D]
+layout(std430, binding = 4) readonly buffer AU { uint au[]; };
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; uint nc; uint q_stride; uint pos_word; float scale; uint q_base; uint col; } pc;
+const uint D4 = D / 4u, G = 128u / D4;                 // position groups for the P.V product
+shared vec4 qs[D4];
+shared float ps[128];
+shared float red[8];
+shared vec4 accs[G][D4];
+void main() {
+    uint h = gl_WorkGroupID.x, c = gl_WorkGroupID.y, t = gl_LocalInvocationID.x;
+    uint kvh = h / (pc.n_head / pc.n_kv), n = au[pc.pos_word] + pc.col + 1u, stride4 = pc.n_kv * D4;
+    uint len = (n + pc.nc - 1u) / pc.nc, p0 = c * len, p1 = min(n, p0 + len);
+    for (uint i = t; i < D4; i += 128u) { uint o = pc.q_base + h * pc.q_stride + 4u * i; qs[i] = vec4(qb[o], qb[o + 1u], qb[o + 2u], qb[o + 3u]) * pc.scale; }
+    barrier();
+    uint base4 = (pc.cache_off >> 2) + kvh * D4;
+    float m = -1e30, l = 0.0;
+    uint grp = t / D4, ln = t % D4;
+    vec4 acc = vec4(0.0);
+    for (uint tb = p0; tb < p1; tb += 128u) {
+        uint p = tb + t;
+        float s = -1e30;
+        if (p < p1) { s = 0.0; uint b = base4 + p * stride4; for (uint d = 0u; d < D4; d++) s += dot(qs[d], vec4(kc4[b + d])); }
+        float tm = subgroupMax(s);
+        if (subgroupElect()) red[gl_SubgroupID] = tm;
+        barrier();
+        tm = red[0]; for (uint i = 1u; i < gl_NumSubgroups; i++) tm = max(tm, red[i]);
+        float mn = max(m, tm), corr = exp(m - mn);
+        float e = p < p1 ? exp(s - mn) : 0.0;
+        ps[t] = e;
+        barrier();   // ps visible; red free again
+        float ts = subgroupAdd(e);
+        if (subgroupElect()) red[gl_SubgroupID] = ts;
+        acc *= corr;
+        uint te = min(128u, p1 - tb);
+        for (uint j = grp; j < te; j += G) acc += ps[j] * vec4(vc4[base4 + (tb + j) * stride4 + ln]);
+        barrier();
+        ts = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) ts += red[i];
+        l = l * corr + ts; m = mn;
+        barrier();   // before red/ps reuse
+    }
+    accs[grp][ln] = acc;
+    barrier();
+    uint ob = (h * pc.nc + c) * (2u + D);
+    if (t == 0u) { part[ob] = m; part[ob + 1u] = l; }
+    for (uint i = t; i < D4; i += 128u) {
+        vec4 r = vec4(0.0); for (uint g = 0u; g < G; g++) r += accs[g][i];
+        part[ob + 2u + 4u * i] = r.x; part[ob + 3u + 4u * i] = r.y; part[ob + 4u + 4u * i] = r.z; part[ob + 5u + 4u * i] = r.w;
+    }
+}

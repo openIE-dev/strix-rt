@@ -1,0 +1,103 @@
+#version 450
+// Gemma 4 coopmat flash attention for batched prefill, head dim 512 (global layers; no window, linear cache, scale 1).
+// Workgroup = 4 wave32 subgroups = (2 row blocks of 16 queries) x (2 halves of the head dim); 32 queries of one q head.
+// Q comes pre-converted to f16 (q16 [t][n_head*512]) and is read with coopMatLoad from global memory each key block
+// (no register/LDS copy: 512-wide Q does not fit). Per 16-key block: each subgroup forms the partial S over its 256 dims,
+// the pair sums the partials through LDS, both run the same online softmax, and each updates its 256-dim O half.
+// Chunk start pos0 = au[160]. Output f16 into the o-proj GEMM A buffer.
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) readonly buffer Q { float16_t q16[]; };
+layout(std430, binding = 1) readonly buffer KC { uvec4 kc[]; };
+layout(std430, binding = 2) readonly buffer VC { uvec4 vc[]; };
+layout(std430, binding = 3) writeonly buffer A { float16_t a[]; };
+layout(std430, binding = 4) readonly buffer AU { uint au[]; };
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; uint ldq; uint lda; uint M; } pc;
+const uint D = 512u, HD = 256u, QB = 32u, KB = 16u, HC = HD / 16u;
+#define ACC coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>
+#define MA coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA>
+#define MB coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>
+shared uvec4 Ks4[KB * D / 8u];          // 16 KB
+shared uvec4 Vs4[KB * D / 8u];          // 16 KB
+shared float Sp[4][16 * 16];            // partial S per subgroup, then O staging
+shared float16_t Ps[4][16 * 16];
+shared float Cr[4][16 * 16];
+shared float Ls[4][16];
+void main() {
+    uint g = gl_WorkGroupID.x, h = g % pc.n_head, qb = g / pc.n_head;
+    uint tid = gl_LocalInvocationID.x, sg = gl_SubgroupID, lane = gl_SubgroupInvocationID;
+    uint rb = sg >> 1, hf = sg & 1u, kvh = h / (pc.n_head / pc.n_kv);
+    uint pos0 = au[160];
+    uint row0 = qb * QB + rb * 16u;
+    uint last = pos0 + min(qb * QB + QB, pc.M) - 1u;
+    uint qrow = min(row0, pc.M - 1u);            // coopMatLoad of 16 rows from qrow: rows past M read valid memory (buffer padded), results discarded
+    ACC o[HC];
+    [[unroll]] for (uint c = 0u; c < HC; c++) o[c] = ACC(0.0);
+    uint r = lane >> 1, kh = lane & 1u;
+    uint mypos = pos0 + min(row0 + r, pc.M - 1u);
+    float m = -1e30, l = 0.0;
+    uint kvbase4 = (pc.cache_off + kvh * D) / 8u, rowstride4 = pc.n_kv * D / 8u;
+    uint mylast = pos0 + min(row0 + 15u, pc.M - 1u);
+    uint qoff = row0 * pc.ldq + h * D + hf * HD;
+    for (uint k0 = 0u; k0 <= last; k0 += KB) {
+        barrier();
+        for (uint e = tid; e < KB * D / 8u; e += 128u) {
+            uint j = e / (D / 8u), c = e % (D / 8u), kp = k0 + j;
+            uvec4 kv = uvec4(0u), vv = uvec4(0u);
+            if (kp <= last) { uint ix = kvbase4 + kp * rowstride4 + c; kv = kc[ix]; vv = vc[ix]; }
+            Ks4[e] = kv; Vs4[e] = vv;
+        }
+        barrier();
+        bool act = k0 <= mylast;                  // uniform per row block (both halves agree)
+        if (act) {
+            ACC s = ACC(0.0);
+            [[unroll]] for (uint c = 0u; c < HC; c++) {
+                MA qa; coopMatLoad(qa, q16, qoff + c * 16u, pc.ldq, gl_CooperativeMatrixLayoutRowMajor);
+                MB kb; coopMatLoad(kb, Ks4, (hf * HD + c * 16u) / 8u, D / 8u, gl_CooperativeMatrixLayoutColumnMajor);
+                s = coopMatMulAdd(qa, kb, s);
+            }
+            coopMatStore(s, Sp[sg], 0u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+        }
+        barrier();
+        if (!act) continue;
+        uint pr = sg ^ 1u;
+        float sv[8]; float bm = -1e30;
+        [[unroll]] for (uint j = 0u; j < 8u; j++) {
+            uint kk = kh * 8u + j, kp = k0 + kk;
+            float x = kp <= mypos ? Sp[sg][r * 16u + kk] + Sp[pr][r * 16u + kk] : -1e30;
+            sv[j] = x; bm = max(bm, x);
+        }
+        bm = max(bm, subgroupShuffleXor(bm, 1u));
+        float mn = max(m, bm), cr = exp(m - mn), ps = 0.0;
+        [[unroll]] for (uint j = 0u; j < 8u; j++) { float p = sv[j] > -1e29 ? exp(sv[j] - mn) : 0.0; ps += p; Ps[sg][r * 16u + kh * 8u + j] = float16_t(p); }
+        ps += subgroupShuffleXor(ps, 1u);
+        l = l * cr + ps; m = mn;
+        [[unroll]] for (uint j = 0u; j < 8u; j++) Cr[sg][r * 16u + kh * 8u + j] = cr;
+        subgroupMemoryBarrierShared(); subgroupBarrier();
+        ACC crm; coopMatLoad(crm, Cr[sg], 0u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+        MA p0; coopMatLoad(p0, Ps[sg], 0u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+        [[unroll]] for (uint c = 0u; c < HC; c++) {
+            for (uint i = 0u; i < o[c].length(); i++) o[c][i] *= crm[i];
+            MB v0; coopMatLoad(v0, Vs4, (hf * HD + c * 16u) / 8u, D / 8u, gl_CooperativeMatrixLayoutRowMajor);
+            o[c] = coopMatMulAdd(p0, v0, o[c]);
+        }
+    }
+    barrier();
+    if (kh == 0u) Ls[sg][r] = l;
+    subgroupMemoryBarrierShared(); subgroupBarrier();
+    [[unroll]] for (uint c = 0u; c < HC; c++) {
+        coopMatStore(o[c], Sp[sg], 0u, 16u, gl_CooperativeMatrixLayoutRowMajor);
+        subgroupMemoryBarrierShared(); subgroupBarrier();
+        [[unroll]] for (uint e = 0u; e < 8u; e++) {
+            uint idx = e * 32u + lane, rr = idx >> 4, d = idx & 15u, t = row0 + rr;
+            if (t < pc.M) a[t * pc.lda + h * D + hf * HD + c * 16u + d] = float16_t(Sp[sg][rr * 16u + d] / Ls[sg][rr]);
+        }
+        subgroupBarrier();
+    }
+}

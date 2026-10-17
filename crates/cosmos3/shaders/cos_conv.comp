@@ -1,0 +1,72 @@
+#version 450
+// Implicit-GEMM causal conv for the Wan VAE decoder (no im2col buffer): Y[m][n] = sum_k A(m, k) * W[n][k], f16 -> f32 coop matrix.
+// A(m, k): pixel p = p0 + m of a channel-last frame stack (frames of H x W, C channels), k = ((kt*KS + ky)*KS + kx)*C + c
+// (KT x KS x KS taps, temporal causal front padding KT-1, spatial zero padding KS/2), source f16 at element (aoff + pixel) * C.
+// W f16 rows of kpad halves (row n at (w_off16 * 8 + n * kpad) halves). Requires C % 32 == 0, N % 128 == 0.
+// Tile 128 x 128 x BK 32 (one slab stays inside one tap), 8 wave32 (4 along M x 2 along N), shared double buffer + register prefetch.
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer A4 { uvec4 a4[]; };
+layout(std430, binding = 1) readonly buffer W4 { uvec4 w4[]; };
+layout(std430, binding = 2) buffer Y { float y[]; };
+layout(push_constant) uniform PC { uint M; uint p0; uint pl; uint hw; uint W; uint H; uint C; uint flags; uint aoff; uint kpad; uint N; uint w_off16; uint ldy; } pc;
+const uint BM = 128u, BN = 128u, BK = 32u, ST = 5u;
+shared uvec4 As[2][BM * ST]; shared uvec4 Bs[2][BN * ST];
+#define CA coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA>
+#define CB coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB>
+#define CC coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>
+void main() {
+    const uint nt = pc.N / BN, tm = gl_WorkGroupID.x / nt, tn = gl_WorkGroupID.x % nt, t = gl_LocalInvocationID.x;
+    const uint sg = gl_SubgroupID, wm = sg >> 1u, wn = sg & 1u;
+    const uint KT = pc.flags & 3u, KS = (pc.flags >> 2u) & 3u, KK = KT * KS * KS * pc.C;
+    const uint m0 = tm * BM, n0 = tn * BN;
+    // A loader: thread t handles rows (t >> 2) and (t >> 2) + 64, uvec4 column t & 3 of the 32-wide slab
+    uint gf[2], gy[2], gx[2]; bool gv[2];
+    [[unroll]] for (uint i = 0u; i < 2u; i++) { uint r = (t >> 2u) + i * 64u; uint p = pc.p0 + m0 + r; gv[i] = (m0 + r) < pc.M;
+        uint f = p / pc.hw, q = p - f * pc.hw, yy = q / pc.W; gf[i] = f; gy[i] = yy; gx[i] = q - yy * pc.W; }
+    uvec4 ra[2], rb[2];
+    const uint c4 = t & 3u;
+    CC acc[2][4];
+    [[unroll]] for (uint i = 0u; i < 2u; i++) [[unroll]] for (uint j = 0u; j < 4u; j++) acc[i][j] = CC(0.0);
+    uint kb = 0u, buf = 0u;
+    // slab 0 loads
+    for (;;) {
+        // (re)load the slab at kb into registers (first iteration) -- later iterations prefetch below
+        if (kb == 0u) {
+            uint tap = 0u, cc = 0u;
+            [[unroll]] for (uint i = 0u; i < 2u; i++) {
+                int sf = int(gf[i]) - int(KT - 1u), sy = int(gy[i]) - int(KS / 2u), sx = int(gx[i]) - int(KS / 2u);
+                bool ok = gv[i] && sf >= 0 && sy >= 0 && sy < int(pc.H) && sx >= 0 && sx < int(pc.W);
+                ra[i] = ok ? a4[((pc.aoff + (uint(sf) * pc.H + uint(sy)) * pc.W + uint(sx)) * pc.C + cc) / 8u + c4] : uvec4(0u);
+                uint r = (t >> 2u) + i * 64u; rb[i] = w4[pc.w_off16 + ((n0 + r) * pc.kpad) / 8u + c4]; }
+        }
+        [[unroll]] for (uint i = 0u; i < 2u; i++) { uint r = (t >> 2u) + i * 64u; As[buf][r * ST + c4] = ra[i]; Bs[buf][r * ST + c4] = rb[i]; }
+        barrier();
+        uint kn = kb + BK;
+        if (kn < KK) {
+            uint tap = kn / pc.C, cc = kn - tap * pc.C, kt = tap / (KS * KS), rr = tap - kt * KS * KS, ky = rr / KS, kx = rr - ky * KS;
+            [[unroll]] for (uint i = 0u; i < 2u; i++) {
+                int sf = int(gf[i]) + int(kt) - int(KT - 1u), sy = int(gy[i]) + int(ky) - int(KS / 2u), sx = int(gx[i]) + int(kx) - int(KS / 2u);
+                bool ok = gv[i] && sf >= 0 && sy >= 0 && sy < int(pc.H) && sx >= 0 && sx < int(pc.W);
+                ra[i] = ok ? a4[((pc.aoff + (uint(sf) * pc.H + uint(sy)) * pc.W + uint(sx)) * pc.C + cc) / 8u + c4] : uvec4(0u);
+                uint r = (t >> 2u) + i * 64u; rb[i] = w4[pc.w_off16 + ((n0 + r) * pc.kpad + kn) / 8u + c4]; }
+        }
+        [[unroll]] for (uint kk = 0u; kk < 2u; kk++) {
+            CA fa[2]; CB fb[4];
+            [[unroll]] for (uint i = 0u; i < 2u; i++) coopMatLoad(fa[i], As[buf], (wm * 32u + i * 16u) * ST + kk * 2u, ST, gl_CooperativeMatrixLayoutRowMajor);
+            [[unroll]] for (uint j = 0u; j < 4u; j++) coopMatLoad(fb[j], Bs[buf], (wn * 64u + j * 16u) * ST + kk * 2u, ST, gl_CooperativeMatrixLayoutColumnMajor);
+            [[unroll]] for (uint i = 0u; i < 2u; i++) [[unroll]] for (uint j = 0u; j < 4u; j++) acc[i][j] = coopMatMulAdd(fa[i], fb[j], acc[i][j]);
+        }
+        kb = kn; if (kb >= KK) break;
+        buf ^= 1u;
+    }
+    [[unroll]] for (uint i = 0u; i < 2u; i++) [[unroll]] for (uint j = 0u; j < 4u; j++) {
+        uint o = (m0 + wm * 32u + i * 16u) * pc.ldy + n0 + wn * 64u + j * 16u;
+        coopMatStore(acc[i][j], y, o, pc.ldy, gl_CooperativeMatrixLayoutRowMajor);
+    }
+}

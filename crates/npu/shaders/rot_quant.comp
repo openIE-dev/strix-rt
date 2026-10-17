@@ -1,0 +1,87 @@
+#version 450
+// Shared activation prologue of a split linear, two phases (same shader, push "phase"):
+//  phase 0, one workgroup per (token, 1024-block): xr = H_1024(s * x) (Bonsai 2 basis: normalized Sylvester WHT,
+//           explicit signs) or xr = x; input f32 or f16 (push xf16). Writes, from the block in shared memory:
+//           * the GPU half input directly: per-128-group int8 xq [M][K] + scales xs [M][K/128]
+//             (same format and rounding as crates/ternary tern_quantx, which is no longer a separate pass);
+//           * xr in f16 (only phase 1 reads it) and the block amax.
+//  phase 1, one workgroup per token: amax = max_b bmax, NPU A (int8, per-token scale sx, wa_dc tiled [M/m][K/k][m][k]).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer X { float x[]; };
+layout(std430, binding = 0) readonly buffer X16 { float16_t x16[]; };
+layout(std430, binding = 1) readonly buffer SG { float sgn[]; };
+layout(std430, binding = 2) buffer XR { uint xr2[]; };          // f16 pairs
+layout(std430, binding = 3) writeonly buffer A { uint a[]; };
+layout(std430, binding = 4) writeonly buffer S { float sx[]; };
+layout(std430, binding = 5) buffer BM { float bmax[]; };
+layout(std430, binding = 6) writeonly buffer XQ { uint xq4[]; };
+layout(std430, binding = 7) writeonly buffer XS { float xs[]; };
+layout(push_constant) uniform P { uint K; uint m; uint k; uint hadamard; uint ldx; uint phase; uint xf16; uint gpu; } p;
+shared float blk[1024];
+shared float red[256];
+float q(float v, float inv) { float t = v * inv; return clamp(sign(t) * floor(abs(t) + 0.5), -127.0, 127.0); }
+float wg_max(float mx) {
+  uint tid = gl_LocalInvocationID.x;
+  mx = subgroupMax(mx);
+  barrier();
+  if (gl_SubgroupInvocationID == 0u) red[gl_SubgroupID] = mx;
+  barrier();
+  if (tid == 0u) { float m2 = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) m2 = max(m2, red[i]); red[255] = m2; }
+  barrier();
+  return red[255];
+}
+float ld(uint i) { return p.xf16 != 0u ? float(x16[i]) : x[i]; }
+void main() {
+  uint id = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x, tid = gl_LocalInvocationID.x;
+  uint NB = p.K / 1024u;
+  if (p.phase == 0u) {
+    uint r = id / NB, b0 = (id % NB) * 1024u;
+    for (uint i = tid; i < 1024u; i += 256u) blk[i] = p.hadamard != 0u ? ld(r * p.ldx + b0 + i) * sgn[b0 + i] : ld(r * p.ldx + b0 + i);
+    barrier();
+    if (p.hadamard != 0u) {
+      for (uint h = 1u; h < 1024u; h <<= 1u) {
+        for (uint i = tid; i < 512u; i += 256u) { uint i0 = (i / h) * 2u * h + (i % h), i1 = i0 + h; float u = blk[i0], v = blk[i1]; blk[i0] = u + v; blk[i1] = u - v; }
+        barrier();
+      }
+    }
+    float hs = p.hadamard != 0u ? 0.03125 : 1.0;
+    // thread t owns elements 4t..4t+3 = group t/32, lane t%32
+    vec4 v = vec4(blk[4u * tid], blk[4u * tid + 1u], blk[4u * tid + 2u], blk[4u * tid + 3u]) * hs;
+    uint base = r * p.K + b0 + 4u * tid;
+    xr2[base / 2u] = packHalf2x16(v.xy); xr2[base / 2u + 1u] = packHalf2x16(v.zw);
+    float lm = max(max(abs(v.x), abs(v.y)), max(abs(v.z), abs(v.w)));
+    barrier();
+    red[tid] = lm;
+    barrier();
+    if ((tid & 31u) == 0u) { float g = 0.0; for (uint i = 0u; i < 32u; i++) g = max(g, red[tid + i]); blk[tid / 32u] = g; }
+    barrier();
+    float ga = blk[tid / 32u];
+    if (p.gpu != 0u) {
+      float sc = ga / 127.0;
+      ivec4 qi = sc > 0.0 ? ivec4(clamp(round(v / sc), -127.0, 127.0)) : ivec4(0);
+      xq4[base / 4u] = uint(qi.x & 255) | (uint(qi.y & 255) << 8) | (uint(qi.z & 255) << 16) | (uint(qi.w & 255) << 24);
+      if ((tid & 31u) == 0u) xs[r * (p.K / 128u) + (b0 / 128u) + tid / 32u] = sc;
+    }
+    if (tid == 0u) { float bm = 0.0; for (uint i = 0u; i < 8u; i++) bm = max(bm, blk[i]); bmax[r * NB + id % NB] = bm; }
+    return;
+  }
+  uint r = id;
+  float mx = 0.0;
+  for (uint b = tid; b < NB; b += 256u) mx = max(mx, bmax[r * NB + b]);
+  float amax = wg_max(mx);
+  float sc = amax > 0.0 ? amax / 127.0 : 1.0;
+  if (tid == 0u) sx[r] = sc;
+  float inv = 1.0 / sc;
+  uint mb = r / p.m, ii = r % p.m;
+  for (uint i4 = tid; i4 < p.K / 4u; i4 += 256u) {
+    uint kx = i4 * 4u, kb = kx / p.k, j = kx % p.k;
+    uint o = ((mb * (p.K / p.k) + kb) * p.m + ii) * p.k + j;
+    uint e = (r * p.K + kx) / 2u;
+    vec4 v = vec4(unpackHalf2x16(xr2[e]), unpackHalf2x16(xr2[e + 1u]));
+    int q0 = int(q(v.x, inv)), q1 = int(q(v.y, inv)), q2 = int(q(v.z, inv)), q3 = int(q(v.w, inv));
+    a[o / 4u] = uint(q0 & 255) | (uint(q1 & 255) << 8) | (uint(q2 & 255) << 16) | (uint(q3 & 255) << 24);
+  }
+}

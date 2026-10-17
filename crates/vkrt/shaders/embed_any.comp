@@ -1,0 +1,26 @@
+#version 450
+// Generic embedding lookup: x = dequant(row toks[pos]) of any rtcore::qtype format, via q_any's dot32 against one-hot x
+// (each lane picks one element; the row is ~KB, so the 32x ALU overhead is irrelevant). Housekeeping is in rmsprep.comp.
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 0) readonly buffer W2 { uvec2 w2[]; };
+layout(std430, binding = 0) readonly buffer W4 { uvec4 w4[]; };
+layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
+layout(std430, binding = 1) writeonly buffer X { float x[]; };
+layout(std430, binding = 2) readonly buffer AU { uint au[]; };
+layout(std430, binding = 3) readonly buffer T { uint toks[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint w_off; uint K; uint ty; uint pos_word; uint col; uint out_off; } pc;
+uint g_e;
+vec4 XV(uint i) { uint d = g_e - i * 4u; return d < 4u ? vec4(equal(uvec4(d), uvec4(0u, 1u, 2u, 3u))) : vec4(0.0); }
+#include "q_any.glsl"
+void main() {
+    q_any_init(pc.ty);
+    uint tok = toks[au[pc.pos_word] + pc.col], ie = item_elems(pc.ty);
+    uint rb = pc.w_off + tok * row_bytes_of(pc.ty, pc.K);
+    for (uint e = gl_LocalInvocationID.x; e < pc.K; e += 256u) { uint it = e / ie; g_e = e; x[pc.out_off + e] = dot32(pc.ty, rb, it, it * ie / 4u); }
+}

@@ -1,0 +1,77 @@
+#version 450
+// Grouped multi-row MoE gate|up SwiGLU for small prompts (Q4_K, K = 2048 only): one workgroup per (tile, 64-row chunk).
+// Tile table gt (from mcv_psel, T-row tiles): [n_tiles, (expert, r0, r1)*]. The tile's <= T gathered activation rows are
+// staged in shared memory as f16; each wave32 owns 8 weight rows, lane L dequantizes 64 weights of gate and up
+// (superblock L/4, sub-blocks 2(L%4), 2(L%4)+1) and accumulates against all T rows, then subgroup reductions.
+// Weights are read exactly once per tile with no shared-memory staging (the coopmat GEMM is dequant-bound at 2-3 rows/expert).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const uint T = 8u;
+layout(constant_id = 1) const uint NOLDS = 0u;
+layout(constant_id = 2) const uint RR = 1u;      // rows per lane pass (1, 2, 4, 8)   // 1: read activations straight from global (L1/L2) instead of staging in LDS
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 0) readonly buffer W4 { uvec4 w4[]; };
+layout(std430, binding = 1) readonly buffer A { uint a2[]; };          // f16 pairs, [nk][lda]
+layout(std430, binding = 2) writeonly buffer Y { float16_t y16[]; };  // [nk][ldy]
+layout(std430, binding = 3) readonly buffer G { uint gt[]; };
+layout(push_constant) uniform PC { uint goff; uint uoff; uint estride; uint N; uint lda; uint ldy; uint maxt; } pc;
+const uint K = 2048u, RB = 1152u;   // Q4_K row bytes for K = 2048
+shared uint xs[NOLDS != 0u ? 1u : T][K / 2u + K / 64u];   // skewed: word c at c + c/32 (lane L reads from L*32: avoids 32-way bank conflicts)
+#define XI(c) ((c) + ((c) >> 5))
+vec2 sm(uint base, uint j) {        // (scale, min) of sub-block j, get_scale_min_k4; base = byte offset of the block
+    uint s0 = w[(base + 4u) / 4u], s1 = w[(base + 8u) / 4u], s2 = w[(base + 12u) / 4u];
+    uint q[12] = uint[12](s0 & 255u, (s0 >> 8) & 255u, (s0 >> 16) & 255u, s0 >> 24, s1 & 255u, (s1 >> 8) & 255u, (s1 >> 16) & 255u, s1 >> 24, s2 & 255u, (s2 >> 8) & 255u, (s2 >> 16) & 255u, s2 >> 24);
+    if (j < 4u) return vec2(float(q[j] & 63u), float(q[j + 4u] & 63u));
+    return vec2(float((q[j + 4u] & 15u) | ((q[j - 4u] >> 6) << 4)), float((q[j + 4u] >> 4) | ((q[j] >> 6) << 4)));
+}
+uint g_r0, g_nr, g_lda2;
+uint XL(uint t, uint c) { return NOLDS != 0u ? (t < g_nr ? a2[(g_r0 + t) * g_lda2 + c] : 0u) : xs[t][XI(c)]; }
+const uint NS = 2u * RR;   // weight streams per lane: gate and up of RR consecutive rows; each LDS activation read is reused NS times
+void dotN(uint rowb[NS], uint L, inout float acc[NS][T]) {
+    uint sb = L >> 2, qq = L & 3u, x0 = (sb * 256u + qq * 64u) / 2u;
+    float d1[NS], m1[NS], d2[NS], m2[NS]; uint qv[NS][8];
+    [[unroll]] for (uint r = 0u; r < NS; r++) {
+        uint base = rowb[r] + sb * 144u;
+        vec2 dm = unpackHalf2x16(w[base / 4u]);
+        vec2 s_lo = sm(base, 2u * qq), s_hi = sm(base, 2u * qq + 1u);
+        d1[r] = dm.x * s_lo.x; m1[r] = dm.y * s_lo.y; d2[r] = dm.x * s_hi.x; m2[r] = dm.y * s_hi.y;
+        uint qb = (base + 16u + qq * 32u) / 16u; uvec4 qa = w4[qb], qc = w4[qb + 1u];
+        qv[r][0] = qa.x; qv[r][1] = qa.y; qv[r][2] = qa.z; qv[r][3] = qa.w; qv[r][4] = qc.x; qv[r][5] = qc.y; qv[r][6] = qc.z; qv[r][7] = qc.w;
+    }
+    [[unroll]] for (uint i = 0u; i < 8u; i++) {
+        vec4 lo[NS], hi[NS];
+        [[unroll]] for (uint r = 0u; r < NS; r++) { uint q = qv[r][i];
+            lo[r] = vec4(q & 15u, (q >> 8) & 15u, (q >> 16) & 15u, (q >> 24) & 15u) * d1[r] - m1[r];
+            hi[r] = vec4((q >> 4) & 15u, (q >> 12) & 15u, (q >> 20) & 15u, q >> 28) * d2[r] - m2[r]; }
+        [[unroll]] for (uint t = 0u; t < T; t++) {
+            vec4 a = vec4(unpackHalf2x16(XL(t, x0 + 2u * i)), unpackHalf2x16(XL(t, x0 + 2u * i + 1u)));
+            vec4 b = vec4(unpackHalf2x16(XL(t, x0 + 16u + 2u * i)), unpackHalf2x16(XL(t, x0 + 16u + 2u * i + 1u)));
+            [[unroll]] for (uint r = 0u; r < NS; r++) acc[r][t] += dot(lo[r], a) + dot(hi[r], b);
+        }
+    }
+}
+void main() {
+    uint nch = pc.N / 64u, slot = gl_WorkGroupID.x % pc.maxt, ch = gl_WorkGroupID.x / pc.maxt;
+    if (slot >= gt[0]) return;
+    uint e = gt[1u + 3u * slot], r0 = gt[2u + 3u * slot], r1 = gt[3u + 3u * slot], nr = r1 - r0;
+    uint tid = gl_LocalInvocationID.x;
+    g_r0 = r0; g_nr = nr; g_lda2 = pc.lda / 2u;
+    if (NOLDS == 0u) for (uint i = tid; i < T * K / 2u; i += 256u) { uint t = i / (K / 2u), c = i % (K / 2u); xs[t][XI(c)] = t < nr ? a2[(r0 + t) * (pc.lda / 2u) + c] : 0u; }
+    barrier();
+    uint L = gl_SubgroupInvocationID, wv = gl_SubgroupID;
+    for (uint rr = 0u; rr < 8u; rr += RR) {
+        uint n = ch * 64u + wv * 8u + rr;
+        uint rowb[NS]; float acc[NS][T];
+        [[unroll]] for (uint r = 0u; r < RR; r++) { rowb[2u * r] = pc.goff + e * pc.estride + (n + r) * RB; rowb[2u * r + 1u] = pc.uoff + e * pc.estride + (n + r) * RB; }
+        [[unroll]] for (uint r = 0u; r < NS; r++) [[unroll]] for (uint t = 0u; t < T; t++) acc[r][t] = 0.0;
+        dotN(rowb, L, acc);
+        [[unroll]] for (uint r = 0u; r < RR; r++) [[unroll]] for (uint t = 0u; t < T; t++) {
+            float gs = subgroupAdd(acc[2u * r][t]), us = subgroupAdd(acc[2u * r + 1u][t]);
+            if (L == 0u && t < nr) y16[(r0 + t) * pc.ldy + n + r] = float16_t(gs / (1.0 + exp(-gs)) * us);
+        }
+    }
+}

@@ -1,0 +1,26 @@
+#version 450
+// CPU-arithmetic emulation: round a vector in place to ggml's q8_K grid (per 256-block: iscale = -127/max_signed,
+// q = min(127, round_even(iscale*x)), x <- q/iscale), i.e. what llama.cpp's CPU backend feeds its Q4_K/Q6_K dot products.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(push_constant) uniform PC { uint off; } pc;
+shared float ra[8]; shared float rm[8];
+void main() {
+    uint i = pc.off + gl_WorkGroupID.x * 256u + gl_LocalInvocationID.x;
+    float v = x[i], a = abs(v);
+    float sa = subgroupMax(a);
+    // signed value with the largest magnitude (first index on ties, like the CPU loop)
+    uint li = subgroupMin(a == sa ? gl_LocalInvocationID.x : 1024u);
+    float sv = subgroupShuffle(v, li % gl_SubgroupSize);
+    if (subgroupElect()) { ra[gl_SubgroupID] = sa; rm[gl_SubgroupID] = sv; }
+    barrier();
+    float amax = ra[0], mx = rm[0];
+    for (uint s = 1u; s < gl_NumSubgroups; s++) if (ra[s] > amax) { amax = ra[s]; mx = rm[s]; }
+    if (amax == 0.0) { x[i] = 0.0; return; }
+    float iscale = -127.0 / mx;
+    float q = min(127.0, roundEven(iscale * v));
+    x[i] = q * (1.0 / iscale);
+}

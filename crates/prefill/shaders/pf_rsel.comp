@@ -1,0 +1,25 @@
+#version 450
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+// MoE top-k per token (one wave32 per token): p = sigmoid(logit r[2*M*tk + t*64 + e]), choose top-k of p + bias,
+// weights p / sum(p) (as the decode moe_select). Out: r[t*tk + j] = expert id, r[M*tk + t*tk + j] = weight bits.
+layout(local_size_x = 32) in;
+layout(std430, binding = 0) buffer R { uint r[]; };
+layout(std430, binding = 1) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint b_off; uint n_exp; uint tk; uint M; } pc;
+void main() {
+    uint t = gl_WorkGroupID.x, l = gl_SubgroupInvocationID, lb = 2u * pc.M * pc.tk + t * 64u;
+    bool h0 = l < pc.n_exp, h1 = l + 32u < pc.n_exp;
+    float p0 = h0 ? 1.0 / (1.0 + exp(-uintBitsToFloat(r[lb + l]))) : 0.0, p1 = h1 ? 1.0 / (1.0 + exp(-uintBitsToFloat(r[lb + l + 32u]))) : 0.0;
+    float v0 = h0 ? p0 + f32w[pc.b_off + l] : -3.4e38, v1 = h1 ? p1 + f32w[pc.b_off + l + 32u] : -3.4e38;
+    float tot = 0.0; uint ids[8]; float ws[8];
+    for (uint j = 0u; j < pc.tk; j++) {
+        float m = subgroupMax(max(v0, v1));
+        uint idx = subgroupMin(v0 == m ? l : (v1 == m ? l + 32u : 0xFFFFu));
+        float wv = subgroupMax((idx == l) ? p0 : ((idx == l + 32u) ? p1 : -1.0));
+        ids[j] = idx; ws[j] = wv; tot += wv;
+        if (idx == l) v0 = -3.4e38; if (idx == l + 32u) v1 = -3.4e38;
+    }
+    tot = max(tot, 6.103515625e-5);
+    if (l == 0u) for (uint j = 0u; j < pc.tk; j++) { r[t * pc.tk + j] = ids[j]; r[pc.M * pc.tk + t * pc.tk + j] = floatBitsToUint(ws[j] / tot); }
+}

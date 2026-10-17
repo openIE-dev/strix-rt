@@ -1,0 +1,22 @@
+== copy
+BO VA 0xffff800100200000 (mod 2MiB = 0x0) flags DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT
+BO VA 0xffff800102800000 (mod 2MiB = 0x0) flags DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT
+BO VA 0xffff800104e00000 (mod 2MiB = 0x0) flags DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT
+setup 0.120s
+copy GEMV 208.4 GB/s checksum 99.6613; empty submit 28.2 us
+== userptr
+BO VA 0xffff800102000000 (mod 2MiB = 0x0) flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED
+BO VA 0xffff800106000000 (mod 2MiB = 0x0) flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED
+BO VA 0xffff80010a000000 (mod 2MiB = 0x0) flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED
+setup 0.008s
+userptr GEMV 206.0 GB/s checksum 99.6613; empty submit 448.5 us
+== dmabuf
+BO VA 0xffff800100100000 (mod 2MiB = 0x100000) flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED
+BO VA 0xffff800102700000 (mod 2MiB = 0x100000) flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED
+BO VA 0xffff800104d00000 (mod 2MiB = 0x100000) flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED
+setup 0.001s
+dmabuf GEMV 187.9 GB/s checksum 99.6613; empty submit 44.1 us
+== dmabuf_whole
+whole-file BO VA 0xffff800100100000 (mod 2MiB = 0x100000)
+setup 0.004s
+dmabuf_whole GEMV 398.0 GB/s checksum NaN; empty submit 40.9 us

@@ -1,0 +1,17 @@
+#version 450
+// Merge NC split-K partials per head with an attention sink (gpt-oss): the sink logit s_h joins the softmax
+// denominator only: o = sum_c e^(m_c-M) o_c / (sum_c e^(m_c-M) l_c + e^(s_h-M)), M = max(m_c, s_h).
+layout(local_size_x = 64) in;
+const uint D = 64u;
+layout(std430, binding = 0) readonly buffer P { float part[]; };
+layout(std430, binding = 1) writeonly buffer O { float o[]; };
+layout(std430, binding = 2) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint nc; uint sink_off; } pc;
+void main() {
+    uint h = gl_WorkGroupID.x, i = gl_LocalInvocationID.x;
+    float sk = f32w[pc.sink_off + h], M = sk;
+    for (uint c = 0u; c < pc.nc; c++) M = max(M, part[(h * pc.nc + c) * (2u + D)]);
+    float L = exp(sk - M), a = 0.0;
+    for (uint c = 0u; c < pc.nc; c++) { uint b = (h * pc.nc + c) * (2u + D); float e = exp(part[b] - M); L += e * part[b + 1u]; a += e * part[b + 2u + i]; }
+    o[h * D + i] = a / L;
+}

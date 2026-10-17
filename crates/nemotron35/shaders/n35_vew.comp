@@ -1,0 +1,31 @@
+#version 450
+// C-RADIO element-wise ops over rows x d (one thread per element), X rows offset by xoff:
+//  0: X[xoff + r] = Y[r] + P[b + r*d]        (patch embedding + resized position embedding, P = per-image table)
+//  1: X[r] += Y[r] + P[b]                    (residual add with bias)
+//  3: O16 = f16(gelu_erf(Y + P[b]))
+//  4: X[r] = Y[r] + P[b]                     (copy with bias)
+//  5: O16 = f16(relu(Y)^2)                   (projector)
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) readonly buffer Y { float y[]; };
+layout(std430, binding = 2) writeonly buffer O16 { float16_t o16[]; };
+layout(std430, binding = 3) readonly buffer P { float p[]; };
+layout(push_constant) uniform PC { uint mode; uint n; uint d; uint ldx; uint ldy; uint ldo; uint b_off; uint xoff; } pc;
+float erf_(float z) { // Abramowitz-Stegun 7.1.26 (|err| < 1.5e-7), as mcv_vew
+    float s = sign(z), a = abs(z), t = 1.0 / (1.0 + 0.3275911 * a);
+    float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-a * a);
+    return s * y;
+}
+void main() {
+    uint g = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u;
+    if (g >= pc.n * pc.d) return;
+    uint r = g / pc.d, c = g - r * pc.d;
+    float yv = y[r * pc.ldy + c];
+    if (pc.mode == 0u) x[(pc.xoff + r) * pc.ldx + c] = yv + p[pc.b_off + r * pc.d + c];
+    else if (pc.mode == 1u) x[r * pc.ldx + c] += yv + p[pc.b_off + c];
+    else if (pc.mode == 3u) { float v = yv + p[pc.b_off + c]; o16[r * pc.ldo + c] = float16_t(0.5 * v * (1.0 + erf_(v * 0.7071067811865476))); }
+    else if (pc.mode == 5u) { float v = max(yv, 0.0); o16[r * pc.ldo + c] = float16_t(v * v); }
+    else x[r * pc.ldx + c] = yv + p[pc.b_off + c];
+}

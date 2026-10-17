@@ -1,0 +1,37 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+latent t3 h16 w16 -> 192 tokens; cond 71 uncond 63 text tokens; 8 steps, 16 calls
+loaded 0.35s zc=true layers 36
+position ids: 0 / 263 mismatches
+prefix gpu 379.0 + 219.3 ms
+PHASE prefix 1792091462.640 1792091463.767
+sigmas max|d| 0.00e0  timesteps max|d| 0.00e0
+step 0 free-run latent vs ref cos 0.999997 rel 2.430e-3 max|d| 0.0154 (n 36864 vs 36864)
+step 1 free-run latent vs ref cos 0.999995 rel 3.064e-3 max|d| 0.0184 (n 36864 vs 36864)
+step 2 free-run latent vs ref cos 0.999987 rel 5.162e-3 max|d| 0.0300 (n 36864 vs 36864)
+step 3 free-run latent vs ref cos 0.999917 rel 1.286e-2 max|d| 0.0524 (n 36864 vs 36864)
+step 4 free-run latent vs ref cos 0.999282 rel 3.792e-2 max|d| 0.1331 (n 36864 vs 36864)
+step 5 free-run latent vs ref cos 0.991112 rel 1.330e-1 max|d| 0.4944 (n 36864 vs 36864)
+step 6 free-run latent vs ref cos 0.974638 rel 2.250e-1 max|d| 1.7399 (n 36864 vs 36864)
+denoise 8 steps: gpu 6.71s wall 8.67s
+PHASE denoise 1792091463.768 1792091470.941
+wrote logs/cos/bench1.ours2.lat.f32 [48][3][16][16]
+vae loaded 1.50s
+vae decode gpu 0.97s wall 1.05s (load+decode 2.58s)
+PHASE vae 1792091471.036 1792091473.615
+video vs golden pipeline [9, 256, 256, 3]: PSNR 23.64 dB cos 0.990337 rel 1.387e-1 max|d| 0.8316 (n 1769472 vs 1769472)
+wrote logs/cos/bench1.ours2.video.f32 [3][9][256][256], logs/cos/bench1.ours2.rgb, mp4: Ok(true)
+duration 11.450 s, 230 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package       758.404      66.24       12.55      614.690  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores          42.663       3.73        1.37       27.008  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu       39.369       3.44        3.27        1.965  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        0.876       0.08        0.23       -1.749  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx               250.430      21.87       13.47       96.246  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other         415.025      36.25       24.23      137.555  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket            704.824      61.56       40.97      235.767  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon         698.712      61.02       40.57      234.187  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

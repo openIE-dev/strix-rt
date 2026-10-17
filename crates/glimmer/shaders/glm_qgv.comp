@@ -1,0 +1,78 @@
+#version 450
+// Integer-dot decode GEMV for Q4_K / Q6_K rows (llama.cpp MMVQ scheme): x pre-quantised to int8 per 32 (glm_xq), dotPacked4x8 against the
+// packed weight nibbles, scales applied per 32-weight sub-block. Same push-constant layout as rtcore GQ (types per segment, up to 4 segments).
+// LPR lanes per row (spec 1), each lane walks 256-weight super-blocks lane, lane+LPR, ...
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_integer_dot_product : require
+layout(local_size_x_id = 0) in;
+#ifndef LPR
+#define LPR 16u
+#endif
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 0) readonly buffer W4 { uvec4 w4[]; };
+layout(std430, binding = 1) readonly buffer XQ { uint xq[]; };
+layout(std430, binding = 2) buffer Y { float y[]; };
+layout(push_constant) uniform PC { uint N; uint K; uint flags; uint y_off; uint norm_off; uint sq_in; uint sq_out; uint r1; uint r2; uint r3; uint types;
+    uint w0; uint w1; uint w2; uint w3; uint wup; uint b0; uint b1; uint b2; uint b3; float eps; uint x_off4; uint x_cs; uint y_cs; } pc;
+int dp4(uint a, uint b) { return dotPacked4x8EXT(int(a), int(b)); }
+uint sbyte(uvec4 v, uint i) { uint u = i < 4u ? v.x : i < 8u ? v.y : i < 12u ? v.z : v.w; return (u >> (8u * (i & 3u))) & 0xFFu; }
+uint rdb(uint bo) { return (w[bo >> 2] >> (8u * (bo & 3u))) & 0xFFu; }
+void main() {
+    uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint rps = gl_SubgroupSize / LPR, lane = gl_SubgroupInvocationID % LPR;
+    uint row = (wg * gl_NumSubgroups + gl_SubgroupID) * rps + gl_SubgroupInvocationID / LPR;
+    bool valid = row < pc.N;
+    uint seg = row < pc.r1 ? 0u : row < pc.r2 ? 1u : row < pc.r3 ? 2u : 3u;
+    uint segb = seg == 0u ? 0u : seg == 1u ? pc.r1 : seg == 2u ? pc.r2 : pc.r3;
+    uint woff = seg == 0u ? pc.w0 : seg == 1u ? pc.w1 : seg == 2u ? pc.w2 : pc.w3;
+    uint ty = (pc.types >> (4u * seg)) & 0xFu;
+    uint K = pc.K, nblk = K / 256u, ni = K / 32u, XD = K / 4u, XS = XD + ni, X16 = XS + ni;
+    uint rbs = ty == 0u ? nblk * 144u : nblk * 210u;
+    uint rb = woff + (row - segb) * rbs;
+    float acc = 0.0;
+    if (valid) {
+        for (uint bl = lane; bl < nblk; bl += LPR) {
+            if (ty == 0u) {   // Q4_K: d, dmin, scales[12], qs[128]
+                uint b = rb + bl * 144u;
+                uvec4 hd = w4[b >> 4];
+                vec2 dm = unpackHalf2x16(hd.x);
+                [[unroll]] for (uint jj = 0u; jj < 4u; jj++) {
+                    uvec4 qa = w4[(b >> 4) + 1u + 2u * jj], qc = w4[(b >> 4) + 2u + 2u * jj];
+                    uint qq[8] = uint[8](qa.x, qa.y, qa.z, qa.w, qc.x, qc.y, qc.z, qc.w);
+                    [[unroll]] for (uint h = 0u; h < 2u; h++) {
+                        uint s = 2u * jj + h, it = bl * 8u + s, xb = it * 8u;
+                        uint sc_, mn_;
+                        if (s < 4u) { sc_ = sbyte(hd, 4u + s) & 63u; mn_ = sbyte(hd, 8u + s) & 63u; }
+                        else { sc_ = (sbyte(hd, 8u + s) & 0xFu) | ((sbyte(hd, s) >> 6) << 4); mn_ = (sbyte(hd, 8u + s) >> 4) | ((sbyte(hd, 4u + s) >> 6) << 4); }
+                        int is = 0;
+                        [[unroll]] for (uint k = 0u; k < 8u; k++) is += dp4((qq[k] >> (4u * h)) & 0x0F0F0F0Fu, xq[xb + k]);
+                        acc += dm.x * float(sc_) * uintBitsToFloat(xq[XD + it]) * float(is) - dm.y * float(mn_) * uintBitsToFloat(xq[XS + it]);
+                    }
+                }
+            } else {          // Q6_K: ql[128], qh[64], scales[16] int8, d (block 210 B, 2-aligned)
+                uint b = rb + bl * 210u; bool odd = (b & 2u) != 0u; uint bw = b >> 2;
+                float d = unpackHalf2x16((w[(b + 208u) >> 2] >> (8u * ((b + 208u) & 3u))) & 0xFFFFu).x;
+                [[dont_unroll]] for (uint s = 0u; s < 8u; s++) {
+                    uint n = s >> 2, q = s & 3u, it = bl * 8u + s, xb = it * 8u, nsh = (q >> 1) * 4u, hsh = q * 2u;
+                    uint qlw = bw + (n * 64u + (q & 1u) * 32u) / 4u, qhw = bw + (128u + n * 32u) / 4u;
+                    int i0 = 0, i1 = 0;
+                    [[unroll]] for (uint k = 0u; k < 8u; k++) {
+                        uint a = odd ? ((w[qlw + k] >> 16) | (w[qlw + k + 1u] << 16)) : w[qlw + k];
+                        uint hq = odd ? ((w[qhw + k] >> 16) | (w[qhw + k + 1u] << 16)) : w[qhw + k];
+                        uint v = ((a >> nsh) & 0x0F0F0F0Fu) | (((hq >> hsh) & 0x03030303u) << 4);
+                        int t = dp4(v, xq[xb + k]);
+                        if (k < 4u) i0 += t; else i1 += t;
+                    }
+                    float c0 = float(int(rdb(b + 192u + n * 8u + 2u * q) << 24) >> 24), c1 = float(int(rdb(b + 193u + n * 8u + 2u * q) << 24) >> 24);
+                    float s0 = uintBitsToFloat(xq[X16 + 2u * it]), s1 = uintBitsToFloat(xq[X16 + 2u * it + 1u]);
+                    acc += d * uintBitsToFloat(xq[XD + it]) * (c0 * (float(i0) - 32.0 * s0) + c1 * (float(i1) - 32.0 * s1));
+                }
+            }
+        }
+    }
+    float a = subgroupClusteredAdd(acc, LPR);
+    if (valid && lane == 0u) y[pc.y_off + row] = a;
+}

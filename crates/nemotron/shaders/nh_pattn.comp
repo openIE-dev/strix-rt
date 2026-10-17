@@ -1,0 +1,59 @@
+#version 450
+// Batched causal GQA attention (no RoPE) for prefill: workgroup (head h, token t) attends over cache positions
+// [0, pos0 + t] with an online softmax over tiles of 128 positions; writes f16 output a[t*lda + h*D + d].
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const uint D = 128u;
+layout(std430, binding = 0) readonly buffer Q { float qb[]; };
+layout(std430, binding = 1) readonly buffer KC { f16vec4 kc4[]; };
+layout(std430, binding = 2) readonly buffer VC { f16vec4 vc4[]; };
+layout(std430, binding = 3) writeonly buffer A { float16_t a[]; };
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; uint pos0; uint ldy; float scale; uint lda; } pc;
+const uint D4 = D / 4u, G = 128u / D4;
+shared vec4 qs[D4];
+shared float ps[128];
+shared float red[8];
+shared vec4 accs[G][D4];
+void main() {
+    uint h = gl_WorkGroupID.x, tk = gl_WorkGroupID.y, t = gl_LocalInvocationID.x;
+    uint kvh = h / (pc.n_head / pc.n_kv), n = pc.pos0 + tk + 1u, stride4 = pc.n_kv * D4;
+    for (uint i = t; i < D4; i += 128u) { uint o = tk * pc.ldy + h * D + 4u * i; qs[i] = vec4(qb[o], qb[o + 1u], qb[o + 2u], qb[o + 3u]) * pc.scale; }
+    barrier();
+    uint base4 = (pc.cache_off >> 2) + kvh * D4;
+    float m = -1e30, l = 0.0;
+    uint grp = t / D4, ln = t % D4;
+    vec4 acc = vec4(0.0);
+    for (uint tb = 0u; tb < n; tb += 128u) {
+        uint p = tb + t;
+        float s = -1e30;
+        if (p < n) { s = 0.0; uint b = base4 + p * stride4; for (uint d = 0u; d < D4; d++) s += dot(qs[d], vec4(kc4[b + d])); }
+        float tm = subgroupMax(s);
+        if (subgroupElect()) red[gl_SubgroupID] = tm;
+        barrier();
+        tm = red[0]; for (uint i = 1u; i < gl_NumSubgroups; i++) tm = max(tm, red[i]);
+        float mn = max(m, tm), corr = exp(m - mn);
+        float e = p < n ? exp(s - mn) : 0.0;
+        ps[t] = e;
+        barrier();
+        float ts = subgroupAdd(e);
+        if (subgroupElect()) red[gl_SubgroupID] = ts;
+        acc *= corr;
+        uint te = min(128u, n - tb);
+        for (uint j = grp; j < te; j += G) acc += ps[j] * vec4(vc4[base4 + (tb + j) * stride4 + ln]);
+        barrier();
+        ts = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) ts += red[i];
+        l = l * corr + ts; m = mn;
+        barrier();
+    }
+    accs[grp][ln] = acc;
+    barrier();
+    for (uint i = t; i < D4; i += 128u) {
+        vec4 r = vec4(0.0); for (uint g = 0u; g < G; g++) r += accs[g][i];
+        r /= l;
+        uint o = tk * pc.lda + h * D + 4u * i;
+        a[o] = float16_t(r.x); a[o + 1u] = float16_t(r.y); a[o + 2u] = float16_t(r.z); a[o + 3u] = float16_t(r.w);
+    }
+}

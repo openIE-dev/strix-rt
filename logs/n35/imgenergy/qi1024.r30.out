@@ -1,0 +1,19 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+preprocess img/qi1024.png -> 1024x1024 (1024 tokens) CPU 10.76 ms
+preprocess CPU median 3.57 ms over 30 runs
+encoded 1024 tokens x 4096: median 1074.4 ms (GPU wall, 30 runs)
+duration 35.900 s, 719 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package      2641.534      73.58        7.89     2358.162  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores          37.480       1.04        0.41       22.600  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu       36.717       1.02        0.93        3.165  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        1.217       0.03        0.02        0.330  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx              1229.075      34.24        0.00     1229.075  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other        1346.609      37.51        7.33     1083.536  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket           2612.400      72.77        8.26     2315.777  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon        2592.970      72.23        7.98     2306.577  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

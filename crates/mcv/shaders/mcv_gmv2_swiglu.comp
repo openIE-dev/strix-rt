@@ -1,0 +1,67 @@
+#version 450
+// Row-per-thread grouped MoE gate|up SwiGLU (Q4_K, K = 2048): one workgroup per (tile of <= T tokens, 256-row chunk);
+// thread i computes gate row n and up row n for all T tokens, so there are no cross-lane reductions; the tile's
+// activations are staged in LDS and read as uniform (broadcast) uvec4 loads. Accumulators: 2T floats per thread.
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const uint T = 8u;
+layout(std430, binding = 0) readonly buffer W { uint w[]; };
+layout(std430, binding = 0) readonly buffer W4 { uvec4 w4[]; };
+layout(std430, binding = 1) readonly buffer A { uvec4 a8[]; };       // 8 f16 per uvec4, [nk][lda/8]
+layout(std430, binding = 2) writeonly buffer Y { float16_t y16[]; };
+layout(std430, binding = 3) readonly buffer G { uint gt[]; };
+layout(push_constant) uniform PC { uint goff; uint uoff; uint estride; uint N; uint lda; uint ldy; uint maxt; } pc;
+const uint K = 2048u, RB = 1152u;
+shared uvec4 xs[T][K / 8u];
+vec2 smk(uvec3 s, uint j) {
+    uint q[12] = uint[12](s.x & 255u, (s.x >> 8) & 255u, (s.x >> 16) & 255u, s.x >> 24, s.y & 255u, (s.y >> 8) & 255u, (s.y >> 16) & 255u, s.y >> 24, s.z & 255u, (s.z >> 8) & 255u, (s.z >> 16) & 255u, s.z >> 24);
+    if (j < 4u) return vec2(float(q[j] & 63u), float(q[j + 4u] & 63u));
+    return vec2(float((q[j + 4u] & 15u) | ((q[j - 4u] >> 6) << 4)), float((q[j + 4u] >> 4) | ((q[j] >> 6) << 4)));
+}
+void main() {
+    uint slot = gl_WorkGroupID.x % pc.maxt, ch = gl_WorkGroupID.x / pc.maxt;
+    if (slot >= gt[0]) return;
+    uint e = gt[1u + 3u * slot], r0 = gt[2u + 3u * slot], nr = gt[3u + 3u * slot] - r0;
+    uint tid = gl_LocalInvocationID.x;
+    for (uint i = tid; i < T * K / 8u; i += 256u) { uint t = i / (K / 8u), c = i % (K / 8u); xs[t][c] = t < nr ? a8[(r0 + t) * (pc.lda / 8u) + c] : uvec4(0u); }
+    barrier();
+    uint n = ch * 256u + tid;
+    if (n >= pc.N) return;
+    float g[T], u[T];
+    [[unroll]] for (uint t = 0u; t < T; t++) { g[t] = 0.0; u[t] = 0.0; }
+    uint gb = (pc.goff + e * pc.estride + n * RB) / 4u, ub = (pc.uoff + e * pc.estride + n * RB) / 4u;
+    for (uint sb = 0u; sb < 8u; sb++) {
+        uvec4 hg = w4[gb / 4u + sb * 9u], hu = w4[ub / 4u + sb * 9u];     // 144 B blocks = 9 uvec4: d|dmin, scales[12]
+        vec2 dmg = unpackHalf2x16(hg.x), dmu = unpackHalf2x16(hu.x);
+        for (uint qq = 0u; qq < 4u; qq++) {
+            vec2 sg0 = smk(hg.yzw, 2u * qq), sg1 = smk(hg.yzw, 2u * qq + 1u), su0 = smk(hu.yzw, 2u * qq), su1 = smk(hu.yzw, 2u * qq + 1u);
+            float gd1 = dmg.x * sg0.x, gm1 = dmg.y * sg0.y, gd2 = dmg.x * sg1.x, gm2 = dmg.y * sg1.y;
+            float ud1 = dmu.x * su0.x, um1 = dmu.y * su0.y, ud2 = dmu.x * su1.x, um2 = dmu.y * su1.y;
+            uint qb = sb * 9u + 1u + qq * 2u;
+            uvec4 G0 = w4[gb / 4u + qb], G1 = w4[gb / 4u + qb + 1u], U0 = w4[ub / 4u + qb], U1 = w4[ub / 4u + qb + 1u];
+            uint gq[8] = uint[8](G0.x, G0.y, G0.z, G0.w, G1.x, G1.y, G1.z, G1.w), uq[8] = uint[8](U0.x, U0.y, U0.z, U0.w, U1.x, U1.y, U1.z, U1.w);
+            uint xb = (sb * 256u + qq * 64u) / 8u;   // uvec4 index of the 64 weights' activations: lo nibbles 0..31, hi 32..63
+            [[unroll]] for (uint i = 0u; i < 8u; i += 2u) {
+                // weights lo: 4i..4i+7 (two uints), hi: 32+4i..32+4i+7
+                vec4 gl0 = vec4(gq[i] & 15u, (gq[i] >> 8) & 15u, (gq[i] >> 16) & 15u, (gq[i] >> 24) & 15u) * gd1 - gm1;
+                vec4 gl1 = vec4(gq[i + 1u] & 15u, (gq[i + 1u] >> 8) & 15u, (gq[i + 1u] >> 16) & 15u, (gq[i + 1u] >> 24) & 15u) * gd1 - gm1;
+                vec4 gh0 = vec4((gq[i] >> 4) & 15u, (gq[i] >> 12) & 15u, (gq[i] >> 20) & 15u, gq[i] >> 28) * gd2 - gm2;
+                vec4 gh1 = vec4((gq[i + 1u] >> 4) & 15u, (gq[i + 1u] >> 12) & 15u, (gq[i + 1u] >> 20) & 15u, gq[i + 1u] >> 28) * gd2 - gm2;
+                vec4 ul0 = vec4(uq[i] & 15u, (uq[i] >> 8) & 15u, (uq[i] >> 16) & 15u, (uq[i] >> 24) & 15u) * ud1 - um1;
+                vec4 ul1 = vec4(uq[i + 1u] & 15u, (uq[i + 1u] >> 8) & 15u, (uq[i + 1u] >> 16) & 15u, (uq[i + 1u] >> 24) & 15u) * ud1 - um1;
+                vec4 uh0 = vec4((uq[i] >> 4) & 15u, (uq[i] >> 12) & 15u, (uq[i] >> 20) & 15u, uq[i] >> 28) * ud2 - um2;
+                vec4 uh1 = vec4((uq[i + 1u] >> 4) & 15u, (uq[i + 1u] >> 12) & 15u, (uq[i + 1u] >> 20) & 15u, uq[i + 1u] >> 28) * ud2 - um2;
+                [[unroll]] for (uint t = 0u; t < T; t++) {
+                    uvec4 xl = xs[t][xb + i / 2u], xh = xs[t][xb + 4u + i / 2u];
+                    vec4 l0 = vec4(unpackHalf2x16(xl.x), unpackHalf2x16(xl.y)), l1 = vec4(unpackHalf2x16(xl.z), unpackHalf2x16(xl.w));
+                    vec4 h0 = vec4(unpackHalf2x16(xh.x), unpackHalf2x16(xh.y)), h1 = vec4(unpackHalf2x16(xh.z), unpackHalf2x16(xh.w));
+                    g[t] += dot(gl0, l0) + dot(gl1, l1) + dot(gh0, h0) + dot(gh1, h1);
+                    u[t] += dot(ul0, l0) + dot(ul1, l1) + dot(uh0, h0) + dot(uh1, h1);
+                }
+            }
+        }
+    }
+    [[unroll]] for (uint t = 0u; t < T; t++) if (t < nr) y16[(r0 + t) * pc.ldy + n] = float16_t(g[t] / (1.0 + exp(-g[t])) * u[t]);
+}

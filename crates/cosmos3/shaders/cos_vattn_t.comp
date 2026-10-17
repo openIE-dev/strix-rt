@@ -1,0 +1,48 @@
+#version 450
+// Tiled online-softmax Wan VAE mid attention (any Np, e.g. 720p latent frames): 256 lanes per (frame, block of QB=4 queries).
+// Keys processed in tiles of 256 (one lane per key), each key row reused for 4 queries; V accumulated per channel in registers.
+// Same layout/push constants as cos_vattn. C <= 1024, C % 256 == 0 not required.
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer QKV { float t[]; };
+layout(std430, binding = 1) writeonly buffer O { float16_t o[]; };
+layout(std430, binding = 2) readonly buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint Np; uint C; uint b_off; float scale; } pc;
+#define QB 4u
+shared float qs[QB * 1024u]; shared float sc[QB * 256u]; shared float red[QB * 16u]; shared float mt[QB];
+void main() {
+    uint nqb = (pc.Np + QB - 1u) / QB, wg = gl_WorkGroupID.x, f = wg / nqb, q0 = (wg % nqb) * QB;
+    uint l = gl_LocalInvocationID.x, C3 = 3u * pc.C, base = f * pc.Np;
+    for (uint q = 0u; q < QB; q++) { uint qi = min(q0 + q, pc.Np - 1u);
+        for (uint c = l; c < pc.C; c += 256u) qs[q * 1024u + c] = (t[(base + qi) * C3 + c] + pr[pc.b_off + c]) * pc.scale; }
+    float m[QB], s[QB], acc[QB * 4u];
+    for (uint q = 0u; q < QB; q++) { m[q] = -3.0e38; s[q] = 0.0; for (uint k = 0u; k < 4u; k++) acc[q * 4u + k] = 0.0; }
+    barrier();
+    for (uint j0 = 0u; j0 < pc.Np; j0 += 256u) {
+        uint j = j0 + l; float d[QB]; for (uint q = 0u; q < QB; q++) d[q] = -3.0e38;
+        if (j < pc.Np) { uint kr = (base + j) * C3 + pc.C; for (uint q = 0u; q < QB; q++) d[q] = 0.0;
+            for (uint c = 0u; c < pc.C; c++) { float kv = t[kr + c] + pr[pc.b_off + pc.C + c];
+                for (uint q = 0u; q < QB; q++) d[q] += qs[q * 1024u + c] * kv; } }
+        for (uint q = 0u; q < QB; q++) { float x = subgroupMax(d[q]); if (subgroupElect()) red[q * 16u + gl_SubgroupID] = x; }
+        barrier();
+        if (l < QB) { float x = red[l * 16u]; for (uint i = 1u; i < gl_NumSubgroups; i++) x = max(x, red[l * 16u + i]); mt[l] = x; }
+        barrier();
+        float mn[QB], al[QB];
+        for (uint q = 0u; q < QB; q++) { mn[q] = max(m[q], mt[q]); al[q] = exp(m[q] - mn[q]);
+            sc[q * 256u + l] = (j < pc.Np) ? exp(d[q] - mn[q]) : 0.0; }
+        barrier();
+        uint nj = min(256u, pc.Np - j0);
+        for (uint q = 0u; q < QB; q++) { float ts = 0.0; for (uint i = 0u; i < nj; i++) ts += sc[q * 256u + i];
+            s[q] = s[q] * al[q] + ts; m[q] = mn[q]; for (uint k = 0u; k < 4u; k++) acc[q * 4u + k] *= al[q]; }
+        for (uint k = 0u; k < 4u; k++) { uint c = l + k * 256u; if (c >= pc.C) break; float bv = pr[pc.b_off + 2u * pc.C + c];
+            for (uint i = 0u; i < nj; i++) { float v = t[(base + j0 + i) * C3 + 2u * pc.C + c] + bv;
+                for (uint q = 0u; q < QB; q++) acc[q * 4u + k] += sc[q * 256u + i] * v; } }
+        barrier();
+    }
+    for (uint q = 0u; q < QB; q++) { if (q0 + q >= pc.Np) break;
+        for (uint k = 0u; k < 4u; k++) { uint c = l + k * 256u; if (c >= pc.C) break;
+            o[(base + q0 + q) * pc.C + c] = float16_t(acc[q * 4u + k] / s[q]); } }
+}

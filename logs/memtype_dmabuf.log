@@ -1,0 +1,16 @@
+copied DL|HV                                 flags DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT      208.5 GB/s  (checksum 99.6613)
+copied HOST_CACHED (GTT, snooped)            flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED       204.9 GB/s  (checksum 99.6613)
+anon import, 4K (MADV_NOHUGEPAGE)            flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED       164.9 GB/s  (checksum 99.6613)
+anon import, THP (MADV_HUGEPAGE)             flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED       196.5 GB/s  (checksum 99.6613)
+file mmap import (page cache, shim)          flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED       174.1 GB/s  (checksum 99.6613)
+mmap base 2MiB-aligned: true
+file mmap import, 2MiB-aligned file ranges   flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED       196.7 GB/s  (checksum 99.6613)
+  empty submit with these userptr imports alive: 3401.0 us
+  dma-buf importable type bits: 0x420
+  strixpc export+import of 28 ranges: 0.001s
+file mmap -> strixpc dma-buf, 2MiB-aligned   flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED       173.6 GB/s  (checksum 99.6613)
+  empty submit with dma-buf imports alive: 3036.4 us
+  empty submit after freeing them: 3065.3 us
+before collapse: FileHugePages:   4552704 kB
+MADV_COLLAPSE whole file: ret -1 (Invalid argument (os error 22)) in 0.00s; after: FileHugePages:   4552704 kB
+file mmap import after MADV_COLLAPSE         flags HOST_VISIBLE | HOST_COHERENT | HOST_CACHED       175.2 GB/s  (checksum 99.6613)

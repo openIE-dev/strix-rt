@@ -1,0 +1,22 @@
+# This repository is read-only: pull requests are closed automatically with a friendly note.
+# pull_request_target runs in the context of the base repository and never checks out or runs the PR's code.
+name: Close pull requests (read-only repo)
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment and close
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr close "$PR" --comment "Thank you for taking the time to open this! strix-rt is published read-only for now, so we don't merge pull requests and this one was closed automatically. It isn't a judgment of your change: we just can't review and maintain outside code yet. Issues are open for questions, reproduction reports and feedback, and forks are very welcome. Take whatever helps you save energy."

@@ -1,0 +1,34 @@
+#version 450
+// Nemotron-H MoE router top-k (decode): p = sigmoid(W_gate x) precomputed by nh_rlog; experts chosen by top-k of
+// p + bias; weights = p[chosen] (optionally / sum, clamped >= 2^-14) * scale. ids -> aux[168+i], weights -> aux[176+i].
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer F { float f[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) buffer AU { uint au[]; };
+layout(std430, binding = 3) readonly buffer RP { float rp[]; };
+layout(push_constant) uniform PC { uint w_off; uint b_off; uint k; uint n_exp; uint top_k; uint norm; float scale; } pc;
+shared float pr[256];
+void main() {
+    uint l = gl_LocalInvocationID.x, sg = gl_SubgroupID, ns = gl_NumSubgroups, ln = gl_SubgroupInvocationID, sz = gl_SubgroupSize;
+    for (uint e = l; e < pc.n_exp; e += 256u) pr[e] = rp[e];   // p from nh_rlog
+    barrier();
+    // top-k on subgroup 0 (as gemma4 g4_router): lane L holds experts L + 32 i (n_exp <= 128, wave32 pipeline);
+    // k rounds of subgroupMax over p + bias, lowest index on ties; weights from unbiased p.
+    if (sg == 0u) {
+        float sv[4]; bool used[4];
+        for (uint i = 0u; i < 4u; i++) { uint e = ln + 32u * i; sv[i] = e < pc.n_exp ? pr[e] + f[pc.b_off + e] : -3.4e38; used[i] = e >= pc.n_exp; }
+        uint ids[8]; float ws[8]; float sum = 0.0;
+        for (uint j = 0u; j < pc.top_k; j++) {
+            float bv = -3.4e38; uint bi = 0xFFFFFFFFu;
+            for (uint i = 0u; i < 4u; i++) if (!used[i] && (sv[i] > bv || bi == 0xFFFFFFFFu)) { bv = sv[i]; bi = ln + 32u * i; }
+            float mx = subgroupMax(bi == 0xFFFFFFFFu ? -3.4e38 : bv);
+            uint win = subgroupMin((bi != 0xFFFFFFFFu && bv == mx) ? bi : 0xFFFFFFFFu);
+            if (win % 32u == ln) used[win / 32u] = true;
+            ids[j] = win; ws[j] = pr[win]; sum += pr[win];
+        }
+        sum = max(sum, 6.103515625e-5);
+        if (ln == 0u) for (uint j = 0u; j < pc.top_k; j++) { float w = pc.norm != 0u ? ws[j] / sum : ws[j]; au[168u + j] = ids[j]; au[176u + j] = floatBitsToUint(w * pc.scale); }
+    }
+}

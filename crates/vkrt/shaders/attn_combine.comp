@@ -1,0 +1,23 @@
+#version 450
+// Merge NC split-K attention partials per head: o = sum_c e^(m_c-M) o_c / sum_c e^(m_c-M) l_c.
+// Optional output gate (Qwen3.5/3.8 gated attention): o *= sigmoid(gate[h*gate_stride + gate_off + i]).
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const uint D = 64u;
+layout(std430, binding = 0) readonly buffer P { float part[]; };
+layout(std430, binding = 1) writeonly buffer O { float o[]; };
+layout(std430, binding = 2) readonly buffer GT { float gt[]; };
+layout(push_constant) uniform PC { uint nc; uint gate_stride; uint gate_off; uint use_gate; uint o_off; } pc;
+void main() {
+    uint h = gl_WorkGroupID.x;
+    float M = -1e30;
+    for (uint c = 0u; c < pc.nc; c++) M = max(M, part[(h * pc.nc + c) * (2u + D)]);
+    float L = 0.0;
+    for (uint c = 0u; c < pc.nc; c++) { uint b = (h * pc.nc + c) * (2u + D); L += exp(part[b] - M) * part[b + 1u]; }
+    for (uint i = gl_LocalInvocationID.x; i < D; i += 64u) {
+        float a = 0.0;
+        for (uint c = 0u; c < pc.nc; c++) { uint b = (h * pc.nc + c) * (2u + D); a += exp(part[b] - M) * part[b + 2u + i]; }
+        a /= L;
+        if (pc.use_gate != 0u) { float g = gt[h * pc.gate_stride + pc.gate_off + i]; a *= 1.0 / (1.0 + exp(-g)); }
+        o[pc.o_off + h * D + i] = a;
+    }
+}

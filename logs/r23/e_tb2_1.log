@@ -1,0 +1,23 @@
+[waited 46s for GPU lock; start 07:37:15]
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+weights: copied in 1.126s, 4 arenas/imports (6851 MiB), 498 quant tensors, 2645504 f32 floats
+hadamard: 401 rotated weights, inverse embed true, sign widths [5120, 6144, 17408], gdn perm (128, 16, 3)
+[npu split] weights folded in 5.9 s
+[npu split] 384 calls, npu 1934.1 ms, host wait for prep 1665.3 ms, total so far 3695.1 ms
+prefill 2048: best 3730.9 ms (all [3730]) -> pp2048 548.93 tok/s
+duration 11.879 s, 11830 samples (996 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package      1094.505      92.14       20.37      852.585  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores         440.305      37.07        4.33      388.880  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu      432.745      36.43        3.77      387.987  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone       30.437       2.56        0.61       23.182  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx               248.518      20.92       12.02      105.718  gpu_metrics average_gfx_power [power-integrated]
+npu                 9.451       0.80        0.00        9.451  gpu_metrics average_ipu_power [power-integrated]
+soc_other         361.120      30.40       17.58      152.291  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket           1051.834      88.55       33.37      655.447  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon        1048.004      88.23       33.55      649.478  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]
+[end 07:37:30; exit 0; ran under GPU lock]

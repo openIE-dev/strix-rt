@@ -1,0 +1,19 @@
+#version 450
+// Gemma 4 MoE combine: y[t][i] = sum_j w[t,j] * s[e_j] * yd[inv[t*tk+j]][i]  (w/e from g4_router slots, s = down_exps.scale)
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) writeonly buffer Y { float y[]; };
+layout(std430, binding = 1) readonly buffer D { float yd[]; };
+layout(std430, binding = 2) readonly buffer R { uint ru[]; };
+layout(std430, binding = 3) readonly buffer I { uint g[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint dim; uint n; uint tk; uint s_off; } pc;
+void main() {
+    uint i = gl_GlobalInvocationID.x, t = gl_WorkGroupID.y; if (i >= pc.dim) return;
+    uint nk = pc.n * pc.tk; float s = 0.0;
+    for (uint j = 0u; j < pc.tk; j++) {
+        uint e = ru[440u + 16u * t + j]; float w = uintBitsToFloat(ru[448u + 16u * t + j]);
+        if (pc.s_off != 0xFFFFFFFFu) w *= f32w[pc.s_off + e];
+        s += w * yd[g[nk + t * pc.tk + j] * pc.dim + i];
+    }
+    y[t * pc.dim + i] = s;
+}

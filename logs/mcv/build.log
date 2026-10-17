@@ -1,0 +1,57 @@
+warning: unnecessary parentheses around `if` condition
+  --> crates/rtcore/src/lib.rs:77:32
+   |
+77 |             let (lpr, ls) = if (key.0 == 8 || key.0 == 9 || key.0 == 12) { self.tern } else { (self.lpr, self.ls) };
+   |                                ^                                       ^
+   |
+   = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+   |
+77 -             let (lpr, ls) = if (key.0 == 8 || key.0 == 9 || key.0 == 12) { self.tern } else { (self.lpr, self.ls) };
+77 +             let (lpr, ls) = if key.0 == 8 || key.0 == 9 || key.0 == 12 { self.tern } else { (self.lpr, self.ls) };
+   |
+
+warning: `rtcore` (lib) generated 1 warning (run `cargo fix --lib -p rtcore` to apply 1 suggestion)
+warning: field `embed` is never read
+  --> crates/qwen38/src/lib.rs:20:5
+   |
+17 | pub struct Model {
+   |            ----- field in this struct
+...
+20 |     embed: Kernel, conv: Kernel, step_k: Kernel, rope: Kernel, attn: Kernel, comb: Kernel, argmax: Kernel, sample: Kernel, nc: u32,
+   |     ^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `qwen38` (lib) generated 1 warning
+warning: field `ldy` is never read
+  --> crates/prefill/src/lfm2moe.rs:14:74
+   |
+14 | pub struct Lf { pub mmax: u32, x: Buffer, a: Buffer, al: u32, y: Buffer, ldy: u32, ag: Buffer, yg: Buffer, hg: Buffer, yd: Buffer, r...
+   |            -- field in this struct                                       ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `expert` is never used
+  --> crates/prefill/src/lfm2moe.rs:40:4
+   |
+40 | fn expert(w: WRef, e: u32) -> WRef { let eb = w.bytes / w.e.max(1) as u64; WRef { off: w.off + e as u64 * eb, bytes: eb, e: 1, ..w } }
+   |    ^^^^^^
+
+warning: `prefill` (lib) generated 2 warnings
+   Compiling mcv v0.1.0 (~/strix-rt/crates/mcv)
+warning: fields `ldp_max` and `a2` are never read
+  --> crates/mcv/src/prefill.rs:19:41
+   |
+18 | pub struct Prefill {
+   |            ------- fields in this struct
+19 |     pub pf: Pf, pub mmax: u32, al: u32, ldp_max: u32,
+   |                                         ^^^^^^^
+20 |     prope: Kernel, psel: Kernel, shadd: Kernel,
+21 |     x: Buffer, a: Buffer, a2: Buffer, p: Buffer, cv: Buffer, o: Buffer, pos: Buffer,
+   |                           ^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `mcv` (lib) generated 1 warning
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.04s

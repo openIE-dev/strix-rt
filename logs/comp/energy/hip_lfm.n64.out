@@ -1,0 +1,23 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+ggml_cuda_init: found 1 ROCm devices (Total VRAM: 122880 MiB):
+  Device 0: Radeon 8060S Graphics, gfx1151 (0x1151), VMM: no, Wave Size: 32, VRAM: 122880 MiB
+| model                          |       size |     params | backend    | ngl |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | --: | --------------: | -------------------: |
+| lfm2moe 24B.A2B Q4_K - Medium  |  13.52 GiB |    23.97 B | ROCm       | 999 |   1 |            tg64 |        101.26 ± 0.00 |
+
+build: e36df6047 (11654)
+duration 2.400 s, 49 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package       134.273      55.95       10.32      109.493  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores          22.052       9.19        0.40       21.088  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu       13.184       5.49        2.09        8.170  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        0.164       0.07        0.01        0.135  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx                26.448      11.02       17.82      -16.326  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.003       0.00        0.00        0.003  gpu_metrics average_ipu_power [power-integrated]
+soc_other          51.139      21.31       30.98      -23.219  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket             90.773      37.82       50.89      -31.372  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon          88.552      36.90       50.57      -32.820  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

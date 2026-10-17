@@ -1,0 +1,24 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+weights: copied in 2.889s, 11 arenas/imports (20090 MiB), 432 quant tensors, 22213248 f32 floats
+load 2.9s
+prompt: 12 positions (0 embedded), rope n_pos 12
+prefill (batched): 12 positions, median 0.0511 s over 1 -> 235.0 tok/s (first pred 220)
+prompt(stepwise) 0.05s  decode 83.0 tok/s (320 tok in 3.843s)
+OURS [220, 16, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 271, 2, 220, 18, 13, 17, 13, 17, 220, 103715, 109566, 97381, 121174, 95726, 101725, 96845, 271, 109566, 97381, 121174, 95761, 109566, 103711, 95772, 101725, 98260, 101692, 97121, 3709, 96540, 97327, 109566, 103711, 96875, 126385, 95960, 98145, 96373, 122129, 97817, 110348, 114443, 97817, 3709, 138855, 109566, 103711, 95895, 99923, 99163, 98278, 111732, 114581, 96348, 99462, 101662, 96125, 96184, 97572, 97817, 1710, 124974, 97989, 100700, 3709, 121268, 98041, 98432, 3709, 95847, 132437, 97488, 109566, 95726, 5205, 100668, 96021, 97723, 96304, 3709, 98015, 97702, 96365, 127086, 99218, 97488, 1710, 271, 2, 220, 16, 13, 220, 109566, 97381, 121174, 103725, 271, 109566, 97381, 121174, 103725, 100751, 97331, 95761, 4960, 99924, 98825, 96147, 121174, 99462, 112322, 96275, 95793, 121174, 96275, 24178, 96390, 99446, 98825, 99560, 134035, 113726, 96128, 111085, 126385, 95960, 117888, 3709, 97278, 109566, 121174, 110976, 24178, 97790, 96373, 109566, 121174, 110976, 95999, 134035, 113726, 117888, 96335, 109566, 104983, 112977, 97107, 95744, 95909, 3709, 98257, 109566, 97381, 121174, 97989, 1710, 271, 2, 220, 17, 13, 220, 109566, 97381, 121174, 100661, 271, 2, 40938, 16, 7313, 98825, 121174, 99462, 112322, 96275, 271, 121174, 99462, 112322, 96275, 108589, 96808, 121174, 113633, 99560, 98278, 95954, 110460, 109106, 3709, 96242, 95814, 4960, 271, 13682, 198, 52, 283, 1088, 2282, 59, 90, 84, 696, 313, 16, 2069, 560, 696, 313, 17, 2069, 1088, 65529, 1116, 560]
+REF  []
+MATCH first 0 / 0 tokens
+duration 10.050 s, 202 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package       553.669      55.09       10.37      449.429  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores          41.441       4.12        0.43       37.153  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu       39.972       3.98        2.53       14.508  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        0.640       0.06        0.01        0.512  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx               214.666      21.36       15.00       63.947  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other         232.620      23.15       15.12       80.692  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket            487.258      48.48       32.65      159.147  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon         481.192      47.88       32.22      157.380  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

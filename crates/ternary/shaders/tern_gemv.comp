@@ -1,0 +1,177 @@
+#version 450
+// Ternary decode GEMV: y[y_off+row] = sum_k W[row,k] * x[k]   (x already Hadamard-rotated for Bonsai)
+// One cluster of T lanes per NR rows; 64 lanes per workgroup -> 64/T*NR rows per WG.
+// Formats (one -D): PQ2 (Prism PQ2_0), PTQ1 (Prism PTQ1_0), TQ21 (Kitten TQ2_1), TH5 (thrush 5 trits/byte).
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_control_flow_attributes : require
+#ifndef T
+#define T 8u
+#endif
+#ifndef NR
+#define NR 1u
+#endif
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer W32 { uint w32[]; };
+layout(std430, binding = 0) readonly buffer W16 { uint16_t w16[]; };
+layout(std430, binding = 0) readonly buffer W8 { uint8_t w8[]; };
+layout(std430, binding = 1) readonly buffer X4 { vec4 x4[]; };
+layout(std430, binding = 1) readonly buffer X1 { float x1[]; };
+layout(std430, binding = 2) writeonly buffer Y { float y[]; };
+layout(std430, binding = 3) readonly buffer S { float sc[]; };
+// w_off in bytes; s_off in floats (TH5 scales)
+layout(push_constant) uniform PC { uint N; uint K; uint w_off; uint y_off; uint s_off; uint flags; } pc;
+
+// v holds 8 2-bit codes (00=-1,01=0,10=+1) for 8 consecutive elements
+float dot8_2b(uint v, vec4 a, vec4 b) {
+    vec4 ca = vec4(uvec4(v, v >> 2, v >> 4, v >> 6) & 3u) - 1.0;
+    vec4 cb = vec4(uvec4(v >> 8, v >> 10, v >> 12, v >> 14) & 3u) - 1.0;
+    return dot(ca, a) + dot(cb, b);
+}
+
+#ifdef TH5
+shared uint16_t lut[256];
+#endif
+void main() {
+#ifdef TH5
+    for (uint i = gl_LocalInvocationID.x; i < 256u; i += 64u) { uint b = i, c = 0u; for (uint d = 0u; d < 5u; d++) { c |= (b % 3u) << (2u * d); b /= 3u; } lut[i] = uint16_t(c); }
+    barrier();
+#endif
+    const uint wg = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    const uint lid = gl_LocalInvocationID.x;
+    const uint lane = lid % T;
+    const uint row0 = (wg * (64u / T) + lid / T) * NR;
+    const uint K = pc.K;
+    float acc[NR];
+    [[unroll]] for (uint r = 0u; r < NR; r++) acc[r] = 0.0;
+
+#if defined(PQ2)
+    // unit = 32 elements = 8 qs bytes (4 x u16) of a 34-byte block
+    const uint RB = K / 128u * 34u;
+    const uint U = K / 32u;
+    for (uint u = lane; u < U; u += T) {
+        const uint b = u >> 2, q = u & 3u;
+        vec4 xv[8];
+        [[unroll]] for (uint i = 0u; i < 8u; i++) xv[i] = x4[u * 8u + i];
+        [[unroll]] for (uint r = 0u; r < NR; r++) {
+            const uint row = min(row0 + r, pc.N - 1u);
+            const uint h = (pc.w_off + row * RB + b * 34u) >> 1;   // u16 index of block
+            const float d = unpackHalf2x16(uint(w16[h])).x;
+            const uint qh = h + 1u + q * 4u;
+            float s = 0.0;
+            [[unroll]] for (uint i = 0u; i < 4u; i++) s += dot8_2b(uint(w16[qh + i]), xv[2u * i], xv[2u * i + 1u]);
+            acc[r] += d * s;
+        }
+    }
+#elif defined(PTQ1)
+    // unit = one 28-byte block (7 words): qs[0..16], qs[16..24], qh[0..2] | d<<16
+    const uint RB = K / 128u * 28u;
+    const uint U = K / 128u;
+    for (uint u = lane; u < U; u += T) {
+        [[unroll]] for (uint r = 0u; r < NR; r++) {
+            const uint row = min(row0 + r, pc.N - 1u);
+            const uint wb = (pc.w_off + row * RB + u * 28u) >> 2;
+            const uint xb = u * 32u;   // vec4 index of block start
+            float s = 0.0;
+            // stage 1: 16 bytes in 4 words, 5 trits each -> elems n*16 + m
+            uvec4 q0 = (uvec4(w32[wb]) >> uvec4(0, 8, 16, 24)) & 255u;
+            uvec4 q1 = (uvec4(w32[wb + 1u]) >> uvec4(0, 8, 16, 24)) & 255u;
+            uvec4 q2 = (uvec4(w32[wb + 2u]) >> uvec4(0, 8, 16, 24)) & 255u;
+            uvec4 q3 = (uvec4(w32[wb + 3u]) >> uvec4(0, 8, 16, 24)) & 255u;
+            [[unroll]] for (uint n = 0u; n < 5u; n++) {
+                q0 *= 3u; q1 *= 3u; q2 *= 3u; q3 *= 3u;
+                s += dot(vec4(q0 >> 8) - 1.0, x4[xb + n * 4u + 0u]);
+                s += dot(vec4(q1 >> 8) - 1.0, x4[xb + n * 4u + 1u]);
+                s += dot(vec4(q2 >> 8) - 1.0, x4[xb + n * 4u + 2u]);
+                s += dot(vec4(q3 >> 8) - 1.0, x4[xb + n * 4u + 3u]);
+                q0 &= 255u; q1 &= 255u; q2 &= 255u; q3 &= 255u;
+            }
+            // stage 2: 8 bytes in 2 words -> elems 80 + n*8 + m
+            uvec4 q4 = (uvec4(w32[wb + 4u]) >> uvec4(0, 8, 16, 24)) & 255u;
+            uvec4 q5 = (uvec4(w32[wb + 5u]) >> uvec4(0, 8, 16, 24)) & 255u;
+            [[unroll]] for (uint n = 0u; n < 5u; n++) {
+                q4 *= 3u; q5 *= 3u;
+                s += dot(vec4(q4 >> 8) - 1.0, x4[xb + 20u + n * 2u]);
+                s += dot(vec4(q5 >> 8) - 1.0, x4[xb + 21u + n * 2u]);
+                q4 &= 255u; q5 &= 255u;
+            }
+            // qh: 2 bytes, 4 trits each -> elems 120 + n*2 + h
+            const uint w6 = w32[wb + 6u];
+            uvec2 qh = uvec2(w6, w6 >> 8) & 255u;
+            vec4 xa = x4[xb + 30u], xc = x4[xb + 31u];
+            [[unroll]] for (uint n = 0u; n < 4u; n++) {
+                qh *= 3u;
+                vec2 t = vec2(qh >> 8) - 1.0;
+                vec2 xx = n == 0u ? xa.xy : (n == 1u ? xa.zw : (n == 2u ? xc.xy : xc.zw));
+                s += dot(t, xx);
+                qh &= 255u;
+            }
+            acc[r] += unpackHalf2x16(w6 >> 16).x * s;
+        }
+    }
+#elif defined(TQ21)
+    // unit = half of a 68-byte/256-elem block: 8 qs words + one f16 scale
+    const uint RB = K / 256u * 68u;
+    const uint U = K / 128u;
+    for (uint u = lane; u < U; u += T) {
+        const uint b = u >> 1, g = u & 1u;
+        [[unroll]] for (uint r = 0u; r < NR; r++) {
+            const uint row = min(row0 + r, pc.N - 1u);
+            const uint wb = (pc.w_off + row * RB + b * 68u) >> 2;
+            const float d = unpackHalf2x16(w32[wb + 16u] >> (16u * g)).x;
+            const uint xb = u * 32u;
+            float s = 0.0;
+            [[unroll]] for (uint i = 0u; i < 8u; i++) {
+                uvec4 by = (uvec4(w32[wb + g * 8u + i]) >> uvec4(0, 8, 16, 24));
+                [[unroll]] for (uint l = 0u; l < 4u; l++) s += dot(vec4((by >> (2u * l)) & 3u) - 1.0, x4[xb + l * 8u + i]);
+            }
+            acc[r] += d * s;
+        }
+    }
+#elif defined(TH5)
+    // thrush/kittenml 5 trits per byte, LSD first, code-1. Two row layouts:
+    //  flags&1 == 0: per-row padded (parakeet "thrush-ternary-v2"): row bytes ceil(K/5)
+    //  flags&1 == 1: whole-tensor flat stream (kittenml-ternary-1.58): element (row,i) is trit row*K+i
+    // scales f32 [N][ceil(K/128)] at s_off (binding 3). unit = 8 bytes = 40 trits.
+    const uint G = (K + 127u) / 128u;
+    [[unroll]] for (uint r = 0u; r < NR; r++) {
+        const uint row = min(row0 + r, pc.N - 1u);
+        const bool flatst = (pc.flags & 1u) != 0u;
+        const uint off = flatst ? (row * K) % 5u : 0u;
+        const uint base = pc.w_off + (flatst ? (row * K) / 5u : row * ((K + 4u) / 5u));
+        const uint NB = (K + off + 4u) / 5u;
+        float s = 0.0;
+        const uint sbase = pc.s_off + row * G;
+        for (uint j0 = lane * 8u; j0 < NB; j0 += T * 8u) {
+            [[unroll]] for (uint j = 0u; j < 8u; j++) {
+                if (j0 + j < NB) {
+                    const uint codes = uint(lut[uint(w8[base + j0 + j])]);   // 5 x 2-bit codes, LSD first
+                    const int e0 = int((j0 + j) * 5u) - int(off);
+                    const uint g0 = uint(max(e0, 0)) / 128u, g1 = min(uint(e0 + 4), K - 1u) / 128u;
+                    const float s0 = sc[sbase + g0], s1 = sc[sbase + g1];
+                    if (e0 >= 0 && e0 + 4 < int(K)) {
+                        [[unroll]] for (uint dd = 0u; dd < 5u; dd++) {
+                            const uint e = uint(e0) + dd;
+                            s += ((e >> 7) == g0 ? s0 : s1) * (float((codes >> (2u * dd)) & 3u) - 1.0) * x1[e];
+                        }
+                    } else {
+                        [[unroll]] for (uint dd = 0u; dd < 5u; dd++) {
+                            const int e = e0 + int(dd);
+                            if (e >= 0 && e < int(K)) s += ((uint(e) >> 7) == g0 ? s0 : s1) * (float((codes >> (2u * dd)) & 3u) - 1.0) * x1[e];
+                        }
+                    }
+                }
+            }
+        }
+        acc[r] += s;
+    }
+#endif
+    [[unroll]] for (uint r = 0u; r < NR; r++) {
+        const float v = subgroupClusteredAdd(acc[r], T);
+        if (lane == 0u && row0 + r < pc.N) y[pc.y_off + row0 + r] = v;
+    }
+}

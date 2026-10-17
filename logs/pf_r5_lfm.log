@@ -1,0 +1,28 @@
+[waited 5s; start 18:50:40]
+== check PF_MSEL=0
+logits cosine 0.999253, top10 overlap 9/10, top5 pf [10932, 60, 59, 207, 583] ref [10932, 207, 59, 60, 86]
+top5 ref logits pf [5.704762, 5.346812, 5.3765793, 5.4813514, 4.9690185] ref [6.2144785, 5.5039196, 5.474542, 5.437598, 5.174051]
+L=512: logits max|diff| 0.8252 (max|ref| 9.68), argmax pf 10932 ref 10932, first tok 10932
+  pf  [10932, 229, 25, 23, 26, 229, 25, 23, 26, 229, 25, 23, 26, 229, 25, 23]
+== check PF_MSEL=1
+logits cosine 0.999261, top10 overlap 9/10, top5 pf [10932, 60, 59, 207, 583] ref [10932, 207, 59, 60, 86]
+top5 ref logits pf [5.704762, 5.346812, 5.3765793, 5.4813514, 4.9690185] ref [6.2351418, 5.478121, 5.4750586, 5.4354687, 5.1791625]
+L=512: logits max|diff| 0.8143 (max|ref| 9.70), argmax pf 10932 ref 10932, first tok 10932
+  pf  [10932, 229, 25, 23, 26, 229, 25, 23, 26, 229, 25, 23, 26, 229, 25, 23]
+PF_MSEL=0 : prefill 512: best 246.5 ms (all [249, 246, 247, 247, 247, 246]) -> pp512 2076.98 tok/s
+PF_MSEL=1 : prefill 512: best 246.7 ms (all [249, 247, 246, 246, 247, 246]) -> pp512 2075.51 tok/s
+PF_MSEL=1 PF_MSWI=1 : prefill 512: best 263.1 ms (all [350, 264, 264, 263, 263, 263]) -> pp512 1946.31 tok/s
+PF_MSEL=1 PF_GBM=64 PF_GBM2=64 : prefill 512: best 246.3 ms (all [308, 246, 247, 248, 246, 247]) -> pp512 2079.07 tok/s
+PF_MSEL=1 PF_GBM=64 : prefill 512: best 251.1 ms (all [253, 251, 251, 251, 251, 252]) -> pp512 2038.82 tok/s
+PF_MSEL=1 PF_GBM2=64 : prefill 512: best 241.7 ms (all [244, 241, 242, 242, 241, 242]) -> pp512 2118.39 tok/s
+PF_MSEL=1 PF_GBM=64 PF_MSWI=1 : prefill 512: best 250.6 ms (all [286, 250, 250, 251, 250, 251]) -> pp512 2042.93 tok/s
+PF_MSEL=1 PF_LPS=24 : prefill 512: best 243.9 ms (all [246, 244, 244, 243, 244, 244]) -> pp512 2098.94 tok/s
+PF_MSEL=0 : prefill 512: best 246.6 ms (all [248, 246, 247, 247, 246, 247]) -> pp512 2075.91 tok/s
+PF_MSEL=1 : prefill 512: best 246.5 ms (all [247, 247, 247, 246, 246, 247]) -> pp512 2076.67 tok/s
+PF_MSEL=1 PF_MSWI=1 : prefill 512: best 243.1 ms (all [246, 243, 243, 243, 243, 243]) -> pp512 2106.28 tok/s
+PF_MSEL=1 PF_GBM=64 PF_GBM2=64 : prefill 512: best 244.9 ms (all [247, 246, 244, 245, 246, 246]) -> pp512 2090.94 tok/s
+PF_MSEL=1 PF_GBM=64 : prefill 512: best 250.6 ms (all [251, 251, 251, 250, 251, 250]) -> pp512 2042.89 tok/s
+PF_MSEL=1 PF_GBM2=64 : prefill 512: best 241.8 ms (all [244, 242, 241, 243, 243, 242]) -> pp512 2117.60 tok/s
+PF_MSEL=1 PF_GBM=64 PF_MSWI=1 : prefill 512: best 250.3 ms (all [253, 251, 250, 250, 250, 251]) -> pp512 2045.36 tok/s
+PF_MSEL=1 PF_LPS=24 : prefill 512: best 243.4 ms (all [246, 243, 243, 243, 243, 243]) -> pp512 2103.96 tok/s
+restored auto; other GPU job at end: no

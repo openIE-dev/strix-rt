@@ -1,0 +1,23 @@
+#version 450
+// Batched greedy argmax: workgroup j scans logits[j*stride .. j*stride+N) and writes the index of the max (lowest index
+// on ties) to au[out_word + col0 + j]. Used by the multi-token verify pass and the MTP draft head (host-driven).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 1024) in;
+layout(std430, binding = 0) readonly buffer L { float lg[]; };
+layout(std430, binding = 1) buffer AU { uint au[]; };
+layout(push_constant) uniform PC { uint N; uint stride; uint out_word; uint col0; } pc;
+shared float sv[32]; shared uint si[32];
+void main() {
+    uint j = pc.col0 + gl_WorkGroupID.x, t = gl_LocalInvocationID.x, base = j * pc.stride;
+    float bv = -3.4e38; uint bi = 0xFFFFFFFFu;
+    for (uint i = t; i < pc.N; i += 1024u) { float v = lg[base + i]; if (v > bv) { bv = v; bi = i; } }
+    float m = subgroupMax(bv); uint mi = subgroupMin(bv == m ? bi : 0xFFFFFFFFu);
+    if (subgroupElect()) { sv[gl_SubgroupID] = m; si[gl_SubgroupID] = mi; }
+    barrier();
+    if (t == 0u) {
+        float v = sv[0]; uint idx = si[0];
+        for (uint s = 1u; s < gl_NumSubgroups; s++) if (sv[s] > v || (sv[s] == v && si[s] < idx)) { v = sv[s]; idx = si[s]; }
+        au[pc.out_word + j] = idx;
+    }
+}

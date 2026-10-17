@@ -1,0 +1,54 @@
+#version 450
+#extension GL_EXT_control_flow_attributes : require
+// mcv fork of prefill/pf_gdn_scan: the 128 state rows of a value head are split across 128/R workgroups of R threads
+// (rows are independent given k, q, v), so the latency-bound sequential scan uses nv*128/R workgroups instead of nv.
+// Same recurrence: S_i *= exp(g); d_i = (v_i - S_i.k) * beta; S_i += d_i k; o_i = S_i.q.
+layout(local_size_x_id = 0) in;
+layout(constant_id = 0) const uint R = 32u;
+layout(constant_id = 1) const uint PMODE = 0u;   // profiling: 1 = no recurrence math, 2 = no per-token LDS reads of k/q
+layout(std430, binding = 0) readonly buffer CV { float cv[]; };
+layout(std430, binding = 1) readonly buffer PR { float pr[]; };
+layout(std430, binding = 2) buffer S { vec4 s4[]; };
+layout(std430, binding = 3) writeonly buffer O { float o[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint nk; uint nv; uint s_off4; uint a_off; uint b_off; uint dt_off; uint A_off; uint ldp; uint ldc; uint M; } pc;
+const uint CH = 16u;
+shared vec4 ks[CH][32]; shared vec4 qs[CH][32]; shared float vs[CH][R]; shared float dec[CH]; shared float bet[CH];
+void main() {
+    uint nb = 128u / R, h = gl_WorkGroupID.x / nb, rb = gl_WorkGroupID.x % nb, l = gl_LocalInvocationID.x, i = rb * R + l, kh = h % pc.nk;
+    vec4 s[32];
+    uint sb = pc.s_off4 + (h * 128u + i) * 32u;
+    [[unroll]] for (uint j = 0u; j < 32u; j++) s[j] = s4[sb + j];
+    float dtb = f32w[pc.dt_off + h], Ah = f32w[pc.A_off + h];
+    for (uint t0 = 0u; t0 < pc.M; t0 += CH) {
+        uint n = min(CH, pc.M - t0);
+        barrier();
+        for (uint e = l; e < n * 64u; e += R) {
+            uint tt = e / 64u, q = e % 64u, cb = (t0 + tt) * pc.ldc;
+            if (q < 32u) { uint b = cb + kh * 128u + 4u * q; qs[tt][q] = vec4(cv[b], cv[b + 1u], cv[b + 2u], cv[b + 3u]); }
+            else { uint b = cb + pc.nk * 128u + kh * 128u + 4u * (q - 32u); ks[tt][q - 32u] = vec4(cv[b], cv[b + 1u], cv[b + 2u], cv[b + 3u]); }
+        }
+        for (uint tt = 0u; tt < n; tt++) vs[tt][l] = cv[(t0 + tt) * pc.ldc + 2u * pc.nk * 128u + h * 128u + i];
+        for (uint e = l; e < n; e += R) {
+            uint pb = (t0 + e) * pc.ldp;
+            float al = pr[pb + pc.a_off + h] + dtb;
+            float sp = al > 20.0 ? al : log(1.0 + exp(al));
+            dec[e] = exp(sp * Ah);
+            bet[e] = 1.0 / (1.0 + exp(-pr[pb + pc.b_off + h]));
+        }
+        barrier();
+        if (PMODE == 1u) { for (uint tt = 0u; tt < n; tt++) o[(t0 + tt) * pc.nv * 128u + h * 128u + i] = vs[tt][l] * dec[tt]; continue; }
+        for (uint tt = 0u; tt < n; tt++) {
+            float d = dec[tt];
+            vec4 a0 = vec4(0.0), a1 = vec4(0.0);
+            [[unroll]] for (uint j = 0u; j < 32u; j += 2u) { s[j] *= d; s[j + 1u] *= d; a0 += s[j] * (PMODE == 2u ? ks[0][j] : ks[tt][j]); a1 += s[j + 1u] * (PMODE == 2u ? ks[0][j + 1u] : ks[tt][j + 1u]); }
+            vec4 a = a0 + a1;
+            float dl = (vs[tt][l] - (a.x + a.y + a.z + a.w)) * bet[tt];
+            vec4 b0 = vec4(0.0), b1 = vec4(0.0);
+            [[unroll]] for (uint j = 0u; j < 32u; j += 2u) { s[j] += dl * ks[tt][j]; s[j + 1u] += dl * ks[tt][j + 1u]; b0 += s[j] * qs[tt][j]; b1 += s[j + 1u] * qs[tt][j + 1u]; }
+            vec4 b = b0 + b1;
+            o[(t0 + tt) * pc.nv * 128u + h * 128u + i] = b.x + b.y + b.z + b.w;
+        }
+    }
+    [[unroll]] for (uint j = 0u; j < 32u; j++) s4[sb + j] = s[j];
+}

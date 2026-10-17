@@ -1,0 +1,18 @@
+#version 450
+// Nemotron-H MoE router logits (decode): one wave32 subgroup per expert, 8 experts per workgroup; p = sigmoid(W_gate x)
+// into rp[e]. Same per-expert summation order as the single-workgroup nh_router it replaces (bit-identical p).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer F { float f[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) writeonly buffer RP { float rp[]; };
+layout(push_constant) uniform PC { uint w_off; uint k; uint n_exp; } pc;
+void main() {
+    uint e = gl_WorkGroupID.x * gl_NumSubgroups + gl_SubgroupID, ln = gl_SubgroupInvocationID, sz = gl_SubgroupSize;
+    if (e >= pc.n_exp) return;
+    float a = 0.0; uint wb = pc.w_off + e * pc.k;
+    for (uint i = ln; i < pc.k; i += sz) a += f[wb + i] * x[i];
+    a = subgroupAdd(a);
+    if (subgroupElect()) rp[e] = 1.0 / (1.0 + exp(-a));
+}

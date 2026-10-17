@@ -1,0 +1,70 @@
+#version 450
+// coop-matrix variant of gemm.comp (same push layout and modes): f16 tiles in uvec4-typed shared memory, f32 accumulate.
+// 64x64 output tile, K step 32, 8 subgroups of 32 (each 16 rows x 32 cols).
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer A { float m[]; };
+layout(push_constant) uniform P { uint M, N, K, mode; uint a_off; int a_sm, a_sk, a_sb; uint b_off; int b_sn, b_sk, b_sb; uint c_off; int c_sm, c_sn, c_sb; uint bias_off; int bias_sb;
+    uint L, KW, cs, cp, cd; int x_sc, x_sl; uint epi; float dv; uint r_off; int r_sm, r_sn; uint ksplit, kchunk, part_off; uint b16; } p;
+layout(std430, binding = 0) buffer A4 { uvec4 m4[]; };
+// b16 != 0: B (mode 0) is pre-packed f16 [N, K] at word offset b16 (16-byte aligned, K % 8 == 0); loaded straight into Bs
+// split-K (mode 0, one batch): ksplit > 1 && kchunk > 0 -> z = slice, raw partials to part_off[(z*M + m)*N + n]; kchunk == 0 -> reduce pass (+bias, epilogue)
+float erf_(float x) { float s = sign(x); x = abs(x); float t = 1.0 / (1.0 + 0.3275911 * x);
+    float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-x * x); return s * y; }
+// fused epilogue (mode 0 only): 1 = divide by dv, 2 = exact gelu, 4 = add residual r[gm, gn]
+float epi(float v, uint gm, uint gn) { if ((p.epi & 1u) != 0u) v = v / p.dv; if ((p.epi & 2u) != 0u) v = 0.5 * v * (1.0 + erf_(v * 0.70710678118654752));
+    if ((p.epi & 4u) != 0u) v += m[int(p.r_off) + int(gm) * p.r_sm + int(gn) * p.r_sn]; return v; }
+const uint L4 = 5u; const uint LS = 17u;
+shared uvec4 As[64 * L4]; shared uvec4 Bs[64 * L4]; shared vec4 Cs[64 * LS];
+uint pk(float a, float b) { return packFloat2x16(f16vec2(float16_t(a), float16_t(b))); }
+void main() {
+    uint tid = gl_LocalInvocationID.x; uint tm = gl_WorkGroupID.y * 64u, tn = gl_WorkGroupID.x * 64u; uint bz = gl_WorkGroupID.z;
+    int ab = int(p.a_off) + int(bz) * p.a_sb, bb = int(p.b_off) + int(bz) * p.b_sb, cb = int(p.c_off) + int(bz) * p.c_sb;
+    uint sg = gl_SubgroupID; uint si = sg >> 1, sj = (sg & 1u) * 32u;
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> c0 = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0), c1 = c0;
+    uint ns = max(p.ksplit, 1u);
+    if (ns > 1u && p.kchunk == 0u) {
+        for (uint e = tid; e < 4096u; e += 256u) { uint rr = e >> 6, cc = e & 63u; uint gm = tm + rr, gn = tn + cc; if (gm >= p.M || gn >= p.N) continue;
+            float v = 0.0; for (uint z = 0u; z < ns; z++) v += m[p.part_off + (z * p.M + gm) * p.N + gn];
+            float bias = p.bias_off != 0xffffffffu ? m[p.bias_off + gn] : 0.0;
+            m[cb + int(gm) * p.c_sm + int(gn) * p.c_sn] = epi(v + bias, gm, gn); }
+        return; }
+    uint kbeg = 0u, kend = p.K; if (ns > 1u) { kbeg = bz * p.kchunk; kend = min(p.K, kbeg + p.kchunk); ab = int(p.a_off); bb = int(p.b_off); }
+    uint r = tid >> 2, k8 = (tid & 3u) * 8u;
+    for (uint k0 = kbeg; k0 < kend; k0 += 32u) {
+        float va[8], vb[8]; uint gm = tm + r, gn = tn + r;
+        [[unroll]] for (uint i = 0u; i < 8u; i++) { uint gk = k0 + k8 + i;
+            va[i] = (gm < p.M && gk < kend) ? m[ab + int(gm) * p.a_sm + int(gk) * p.a_sk] : 0.0;
+            float bv = 0.0;
+            if (p.b16 == 0u && gn < p.N && gk < kend) {
+                if (p.mode == 0u) bv = m[bb + int(gn) * p.b_sn + int(gk) * p.b_sk];
+                else { uint c = gk / p.KW, kw = gk % p.KW; int pos = int(gn * p.cs + kw * p.cd) - int(p.cp);
+                    if (pos >= 0 && pos < int(p.L)) bv = m[bb + int(c) * p.x_sc + pos * p.x_sl]; }
+            }
+            vb[i] = bv; }
+        As[r * L4 + (tid & 3u)] = uvec4(pk(va[0], va[1]), pk(va[2], va[3]), pk(va[4], va[5]), pk(va[6], va[7]));
+        if (p.b16 != 0u) { uint gk0 = k0 + k8; Bs[r * L4 + (tid & 3u)] = (gn < p.N && gk0 < kend) ? m4[(p.b16 + (gn * p.K + gk0) / 2u) / 4u] : uvec4(0u); }
+        else Bs[r * L4 + (tid & 3u)] = uvec4(pk(vb[0], vb[1]), pk(vb[2], vb[3]), pk(vb[4], vb[5]), pk(vb[6], vb[7]));
+        barrier();
+        [[unroll]] for (uint ks = 0u; ks < 2u; ks++) {
+            coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> a; coopMatLoad(a, As, si * 16u * L4 + ks * 2u, L4, gl_CooperativeMatrixLayoutRowMajor);
+            coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> b0, b1;
+            coopMatLoad(b0, Bs, sj * L4 + ks * 2u, L4, gl_CooperativeMatrixLayoutColumnMajor);
+            coopMatLoad(b1, Bs, (sj + 16u) * L4 + ks * 2u, L4, gl_CooperativeMatrixLayoutColumnMajor);
+            c0 = coopMatMulAdd(a, b0, c0); c1 = coopMatMulAdd(a, b1, c1);
+        }
+        barrier();
+    }
+    coopMatStore(c0, Cs, si * 16u * LS + sj / 4u, LS, gl_CooperativeMatrixLayoutRowMajor);
+    coopMatStore(c1, Cs, si * 16u * LS + (sj + 16u) / 4u, LS, gl_CooperativeMatrixLayoutRowMajor);
+    barrier();
+    if (ns > 1u) { for (uint e = tid; e < 4096u; e += 256u) { uint rr = e >> 6, cc = e & 63u; uint gm = tm + rr, gn = tn + cc; if (gm >= p.M || gn >= p.N) continue;
+        m[p.part_off + (bz * p.M + gm) * p.N + gn] = Cs[rr * LS + (cc >> 2)][cc & 3u]; } return; }
+    for (uint e = tid; e < 4096u; e += 256u) { uint rr = e >> 6, cc = e & 63u; uint gm = tm + rr, gn = tn + cc; if (gm >= p.M || gn >= p.N) continue;
+        float bias = p.bias_off != 0xffffffffu ? (p.mode == 0u ? m[p.bias_off + gn] : m[int(p.bias_off) + int(bz) * p.bias_sb + int(gm)]) : 0.0;
+        m[cb + int(gm) * p.c_sm + int(gn) * p.c_sn] = epi(Cs[rr * LS + (cc >> 2)][cc & 3u] + bias, gm, gn); }
+}

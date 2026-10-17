@@ -1,0 +1,42 @@
+#version 450
+// Elementwise VAE ops over i < n (grid-stride), channel-last activations [pixel][C]:
+//  0 im2col 3x3 (pad 1; flags 1 = 1x1, K padding only): B[i] for i = p*kpad + k (pixel p0 + p of an Hd x Wd image), k = (ky*3 + kx)*C + c, from f16 A[pix*C + c]
+//  1 store conv chunk: X[(p0 + p)*C + c] = (flags&1 ? X[..] : 0) + Y[p*C2 + c] + P[b_off + c]
+//  2 f32 -> f16: B[i] = X[i]
+//  3 nearest x2 upsample: Y[o] = X[in] (input Hd x Wd, C channels)
+//  4 DupUp3D shortcut (single first chunk): X[o] += Y[in pixel*C2 + src(c, sy, sx)], factor_t = flags, repeats = C*ft*4/C2
+//  5 slice + bias -> f16: v = Y[p*C2 + b_off + c] + P[kpad + b_off + c]; flags&1 ? B[c*Wd + p] (transposed, Wd = pixels) : B[p*C + c]
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer X { float x[]; };
+layout(std430, binding = 1) buffer Y { float y[]; };
+layout(std430, binding = 2) readonly buffer A { float16_t a[]; };
+layout(std430, binding = 3) writeonly buffer B { float16_t b[]; };
+layout(std430, binding = 4) readonly buffer P { float pr[]; };
+layout(push_constant) uniform PC { uint mode; uint n; uint C; uint Wd; uint Hd; uint p0; uint b_off; uint flags; uint C2; uint kpad; uint pad0; uint pad1; } pc;
+void op(uint i) {
+    if (pc.mode == 0u) {
+        uint p = pc.p0 + i / pc.kpad, k = i % pc.kpad; float16_t v = float16_t(0.0);
+        if (pc.flags == 1u) { if (k < pc.C) v = a[p * pc.C + k]; }           // 1x1: just pad K to kpad
+        else if (k < 9u * pc.C) { uint tap = k / pc.C, c = k - tap * pc.C; int yy = int(p / pc.Wd) + int(tap / 3u) - 1, xx = int(p % pc.Wd) + int(tap % 3u) - 1;
+            if (yy >= 0 && yy < int(pc.Hd) && xx >= 0 && xx < int(pc.Wd)) v = a[(uint(yy) * pc.Wd + uint(xx)) * pc.C + c]; }
+        b[i] = v;
+    } else if (pc.mode == 1u) {
+        uint p = i / pc.C, c = i - p * pc.C, o = (pc.p0 + p) * pc.C + c;
+        x[o] = ((pc.flags & 1u) != 0u ? x[o] : 0.0) + y[p * pc.C2 + c] + pr[pc.b_off + c];
+    } else if (pc.mode == 2u) { b[i] = float16_t(x[i]); }
+    else if (pc.mode == 3u) {
+        uint c = i % pc.C, q = i / pc.C, ox = q % (2u * pc.Wd), oy = q / (2u * pc.Wd);
+        y[i] = x[((oy >> 1) * pc.Wd + (ox >> 1)) * pc.C + c];
+    } else if (pc.mode == 4u) {
+        uint c = i % pc.C, q = i / pc.C, ox = q % (2u * pc.Wd), oy = q / (2u * pc.Wd);
+        uint ft = pc.flags, rep = pc.C * ft * 4u / pc.C2, j = (ft - 1u) * 4u + (oy & 1u) * 2u + (ox & 1u);
+        uint src = (c * ft * 4u + j) / rep;
+        x[i] += y[((oy >> 1) * pc.Wd + (ox >> 1)) * pc.C2 + src];
+    } else if (pc.mode == 5u) {
+        uint p = i / pc.C, c = i - p * pc.C; float v = y[p * pc.C2 + pc.b_off + c] + pr[pc.kpad + pc.b_off + c];
+        if ((pc.flags & 1u) != 0u) b[c * pc.Wd + p] = float16_t(v); else b[p * pc.C + c] = float16_t(v);
+    }
+}
+void main() { for (uint i = gl_WorkGroupID.x * 256u + gl_LocalInvocationID.x; i < pc.n; i += gl_NumWorkGroups.x * 256u) op(i); }

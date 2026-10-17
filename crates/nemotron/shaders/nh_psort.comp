@@ -1,0 +1,27 @@
+#version 450
+// MoE grouping (one workgroup, up to 256 experts): r[0..nk) = expert of (token, slot) q. Writes g = [src token | inverse
+// pos] (rows grouped by expert) and the grouped-GEMM tile table gt (gt[0] = count, tile = (expert, first, end)).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer R { uint r[]; };
+layout(std430, binding = 1) buffer G { uint g[]; };
+layout(std430, binding = 2) buffer T { uint gt[]; };
+layout(std430, binding = 3) buffer T2 { uint gt2[]; };
+layout(push_constant) uniform PC { uint nk; uint tk; uint n_exp; uint bm; uint hyb; } pc;
+shared uint cnt[256]; shared uint st[256]; shared uint fill[256];
+void main() {
+    uint t = gl_LocalInvocationID.x;
+    cnt[t] = 0u;
+    barrier();
+    for (uint q = t; q < pc.nk; q += 256u) atomicAdd(cnt[r[q]], 1u);
+    barrier();
+    if (t == 0u) { uint a = 0u; for (uint e = 0u; e < pc.n_exp; e++) { st[e] = a; fill[e] = a; a += cnt[e]; } }
+    barrier();
+    // deterministic order within an expert: serial pass (nk <= a few thousand)
+    if (t == 0u) for (uint q = 0u; q < pc.nk; q++) { uint j = fill[r[q]]++; g[j] = q / pc.tk; g[pc.nk + q] = j; }
+    if (t == 1u) { uint n = 0u, n2 = 0u;
+        for (uint e = 0u; e < pc.n_exp; e++) for (uint m = 0u; m < cnt[e]; m += pc.bm) {
+            uint rem = cnt[e] - m;
+            if (rem <= pc.hyb) { gt2[1u + 3u * n2] = e; gt2[2u + 3u * n2] = st[e] + m; gt2[3u + 3u * n2] = st[e] + cnt[e]; n2++; }
+            else { gt[1u + 3u * n] = e; gt[2u + 3u * n] = st[e] + m; gt[3u + 3u * n] = st[e] + min(m + pc.bm, cnt[e]); n++; } }
+        gt[0] = n; gt2[0] = n2; }
+}

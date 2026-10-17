@@ -1,0 +1,60 @@
+#version 450
+// Prefill MoE selection + grouping for up to 256 experts (one workgroup of 32 wave32s; fork of prefill/pf_moesel):
+// Phase 1 (one wave per token): logits rl[t*ldr + e] -> top-k, softmax over the selected (== softmax, top-k, renorm);
+//   r[t*tk + j] = expert, r[M*tk + t*tk + j] = weight bits; expert counts in shared.
+// Phase 2 (as pf_moesort): g = [src token | inverse pos], tile tables gt (bm-row tiles) and gt2 (bm2-row tiles).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 1024) in;
+layout(std430, binding = 0) readonly buffer RL { float rl[]; };
+layout(std430, binding = 1) coherent buffer R { uint r[]; };
+layout(std430, binding = 2) buffer G { uint g[]; };
+layout(std430, binding = 3) buffer T { uint gt[]; };
+layout(std430, binding = 4) buffer T2 { uint gt2[]; };
+layout(push_constant) uniform PC { uint M; uint tk; uint n_exp; uint bm; uint bm2; uint ldr; } pc;
+shared uint cnt[256]; shared uint st[256]; shared uint fill[256]; shared uint ta[256]; shared uint tb[256];
+void main() {
+    uint t = gl_LocalInvocationID.x, l = gl_SubgroupInvocationID, wv = gl_SubgroupID, nw = gl_NumSubgroups;
+    if (t < 256u) cnt[t] = 0u;
+    barrier();
+    uint nk = pc.M * pc.tk;
+    for (uint tok = wv; tok < pc.M; tok += nw) {
+        float v[8]; for (uint i = 0u; i < 8u; i++) { uint e = l + 32u * i; v[i] = e < pc.n_exp ? rl[tok * pc.ldr + e] : -3.4e38; }
+        float sel[8]; uint ids[8];
+        for (uint j = 0u; j < pc.tk; j++) {
+            float m = -3.4e38; for (uint i = 0u; i < 8u; i++) m = max(m, v[i]);
+            m = subgroupMax(m);
+            uint cand = 0xFFFFu; for (uint i = 0u; i < 8u; i++) if (v[i] == m) cand = min(cand, l + 32u * i);
+            uint idx = subgroupMin(cand);
+            sel[j] = m; ids[j] = idx;
+            if (idx % 32u == l) v[idx / 32u] = -3.4e38;
+        }
+        if (l == 0u) {
+            float tot = 0.0; for (uint j = 0u; j < pc.tk; j++) tot += exp(sel[j] - sel[0]);
+            for (uint j = 0u; j < pc.tk; j++) { r[tok * pc.tk + j] = ids[j]; r[nk + tok * pc.tk + j] = floatBitsToUint(exp(sel[j] - sel[0]) / tot); atomicAdd(cnt[ids[j]], 1u); }
+        }
+    }
+    memoryBarrierBuffer(); memoryBarrierShared(); barrier();
+    // parallel exclusive prefix sums (Hillis-Steele over 256 experts) of counts and of bm / bm2 tile counts
+    uint e = t, c0 = (e < pc.n_exp) ? cnt[e] : 0u;
+    if (t < 256u) { st[e] = c0; ta[e] = (c0 + pc.bm - 1u) / pc.bm; tb[e] = (c0 + pc.bm2 - 1u) / pc.bm2; }
+    barrier();
+    for (uint o = 1u; o < 256u; o <<= 1u) {
+        uint x = 0u, y = 0u, z = 0u;
+        if (t < 256u && e >= o) { x = st[e - o]; y = ta[e - o]; z = tb[e - o]; }
+        barrier();
+        if (t < 256u) { st[e] += x; ta[e] += y; tb[e] += z; }
+        barrier();
+    }
+    if (t < 256u) { uint ex = st[e] - c0; st[e] = ex; fill[e] = ex; }
+    barrier();
+    barrier();
+    for (uint q = t; q < nk; q += 1024u) { uint j = atomicAdd(fill[r[q]], 1u); g[j] = q / pc.tk; g[nk + q] = j; }
+    if (t < 256u && e < pc.n_exp) {
+        uint n = ta[e] - (c0 + pc.bm - 1u) / pc.bm;
+        for (uint m = 0u; m < c0; m += pc.bm) { gt[1u + 3u * n] = e; gt[2u + 3u * n] = st[e] + m; gt[3u + 3u * n] = st[e] + min(m + pc.bm, c0); n++; }
+        n = tb[e] - (c0 + pc.bm2 - 1u) / pc.bm2;
+        for (uint m = 0u; m < c0; m += pc.bm2) { gt2[1u + 3u * n] = e; gt2[2u + 3u * n] = st[e] + m; gt2[3u + 3u * n] = st[e] + min(m + pc.bm2, c0); n++; }
+        if (e == pc.n_exp - 1u) { gt[0] = ta[e]; gt2[0] = tb[e]; }
+    }
+}

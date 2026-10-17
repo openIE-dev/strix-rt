@@ -1,0 +1,51 @@
+#version 450
+// Muse Glimmer per-head q/k/v prep: q = rms(q) * qn, k = rms(k) * kn (qn absorbs qk_scale_factor, kn = 1), optional interleaved (NORM) RoPE on
+// pairs (2j, 2j+1) with angle pos * theta^(-2j/D) (local layers; global layers are NoPE: flags & 2 = no rope), v copied unnormalised.
+// K/V go to the f16 cache at ring slot pos % cap. Workgroup y = token column. Workgroup per head: n_head q heads, then n_kv k heads (each also copies its v head).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Q { float pr[]; };
+layout(std430, binding = 1) buffer KC { float16_t kc[]; };
+layout(std430, binding = 2) buffer VC { float16_t vc[]; };
+layout(std430, binding = 3) readonly buffer AU { uint au[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint D; uint qn_off; uint kn_off; float theta; uint flags; uint cache_off; uint cap;
+    uint k_base; uint v_base; uint pos_word; float eps; uint pr_off; uint col; uint pr_cs; } pc;
+shared float xs[512];
+shared float red[8];
+float rsum(float v) {
+    v = subgroupAdd(v);
+    barrier();
+    if (subgroupElect()) red[gl_SubgroupID] = v;
+    barrier();
+    float s = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) s += red[i];
+    return s;
+}
+void main() {
+    uint h = gl_WorkGroupID.x, t = gl_LocalInvocationID.x, D = pc.D, H = D / 2u, pos = au[pc.pos_word] + pc.col + gl_WorkGroupID.y, pro = pc.pr_off + gl_WorkGroupID.y * pc.pr_cs;
+    bool isq = h < pc.n_head; uint kh = h - pc.n_head;
+    uint o = pro + (isq ? h * D : pc.k_base + kh * D);
+    float ss = 0.0;
+    for (uint i = t; i < D; i += 256u) { float v = pr[o + i]; xs[i] = v; ss += v * v; }
+    float sc = inversesqrt(rsum(ss) / float(D) + pc.eps);
+    uint nw = isq ? pc.qn_off : pc.kn_off;
+    for (uint i = t; i < D; i += 256u) xs[i] = xs[i] * sc * f32w[nw + i];
+    barrier();
+    uint co = pc.cache_off + (pos % pc.cap) * pc.n_kv * D + kh * D;
+    for (uint j = t; j < H; j += 256u) {
+        float x0 = xs[2u * j], x1 = xs[2u * j + 1u], r0 = x0, r1 = x1;
+        if ((pc.flags & 2u) == 0u) {
+            float th = float(pos) * pow(pc.theta, -float(2u * j) / float(D));
+            float c = cos(th), s = sin(th);
+            r0 = x0 * c - x1 * s; r1 = x0 * s + x1 * c;
+        }
+        if (isq) { pr[o + 2u * j] = r0; pr[o + 2u * j + 1u] = r1; }
+        else { kc[co + 2u * j] = float16_t(r0); kc[co + 2u * j + 1u] = float16_t(r1); }
+    }
+    if (isq) return;
+    uint vo = pro + pc.v_base + kh * D;
+    for (uint i = t; i < D; i += 256u) vc[co + i] = float16_t(pr[vo + i]);
+}

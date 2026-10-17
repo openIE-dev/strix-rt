@@ -1,0 +1,14 @@
+#version 450
+// LFM2 short-conv state after M tokens: st = (bx[M-2], bx[M-1]) (falls back to the old state for M < 2).
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer BCX { float bcx[]; };
+layout(std430, binding = 1) buffer ST { float st[]; };
+layout(push_constant) uniform PC { uint dim; uint st_off; uint M; uint ldb; } pc;
+float bx(uint t, uint c) { uint b = t * pc.ldb; return bcx[b + c] * bcx[b + 2u * pc.dim + c]; }
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+    if (c >= pc.dim) return;
+    uint so = pc.st_off + 2u * c;
+    float s1 = bx(pc.M - 1u, c), s0 = pc.M >= 2u ? bx(pc.M - 2u, c) : st[so + 1u];
+    st[so] = s0; st[so + 1u] = s1;
+}

@@ -1,0 +1,23 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+ggml_vulkan: Found 1 Vulkan devices:
+ggml_vulkan: 0 = Radeon 8060S Graphics (RADV STRIX_HALO) (radv) | uma: 1 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 64 | shared memory: 65536 | int dot: 1 | matrix cores: KHR_coopmat
+| model                          |       size |     params | backend    | ngl |  fa |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | --: | --------------: | -------------------: |
+| lfm2moe 24B.A2B Q4_K - Medium  |  13.52 GiB |    23.97 B | Vulkan     | 999 |   1 |            tg64 |        119.63 ± 0.00 |
+
+build: e36df6047 (11654)
+duration 3.700 s, 75 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package       179.677      48.56       10.64      140.309  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores          24.353       6.58        0.45       22.681  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu       20.845       5.63        6.31       -2.497  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        0.247       0.07        0.01        0.193  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx                50.515      13.65       19.43      -21.391  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other          64.175      17.34       25.42      -29.888  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket            135.534      36.63       51.16      -53.776  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon         133.707      36.13       50.80      -54.273  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

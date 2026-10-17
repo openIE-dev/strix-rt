@@ -1,0 +1,30 @@
+#version 450
+// top-k over router logits sq[176+e] (e < n_exp <= 256), softmax over the selected k (== softmax, top-k, renormalise).
+// ids -> au[440+j], weights -> sq[448+j]. One workgroup of 256.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer A { float sq[]; };
+layout(std430, binding = 0) buffer AU { uint au[]; };
+layout(push_constant) uniform PC { uint n_exp; uint top_k; } pc;
+shared float sm[32]; shared uint si[32]; shared float selv[8]; shared uint seli[8];
+void main() {
+    uint t = gl_LocalInvocationID.x, sg = gl_SubgroupID, ns = gl_NumSubgroups;
+    float v = t < pc.n_exp ? sq[176u + t] : -3.4e38;
+    for (uint j = 0u; j < pc.top_k; j++) {
+        float m = subgroupMax(v);
+        uint idx = subgroupMin(v == m ? t : 0xFFFFu);
+        if (subgroupElect()) { sm[sg] = m; si[sg] = idx; }
+        barrier();
+        float bm = -3.4e38; uint bi = 0xFFFFu;
+        for (uint s = 0u; s < ns; s++) { if (sm[s] > bm || (sm[s] == bm && si[s] < bi)) { bm = sm[s]; bi = si[s]; } }
+        if (t == 0u) { selv[j] = bm; seli[j] = bi; }
+        if (t == bi) v = -3.4e38;
+        barrier();
+    }
+    if (t == 0u) {
+        float mx = selv[0], tot = 0.0;
+        for (uint j = 0u; j < pc.top_k; j++) tot += exp(selv[j] - mx);
+        for (uint j = 0u; j < pc.top_k; j++) { au[440u + j] = seli[j]; sq[448u + j] = exp(selv[j] - mx) / tot; }
+    }
+}
