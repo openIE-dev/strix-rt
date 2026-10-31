@@ -134,8 +134,8 @@ impl Ctx {
         let qp = [1.0f32];
         let qci = [vk::DeviceQueueCreateInfo::default().queue_family_index(qfam).queue_priorities(&qp)];
         let mut f11 = vk::PhysicalDeviceVulkan11Features::default().storage_buffer16_bit_access(true);
-        let mut f12 = vk::PhysicalDeviceVulkan12Features::default().shader_float16(true).shader_int8(true).storage_buffer8_bit_access(true).buffer_device_address(true).shader_buffer_int64_atomics(true);
-        let mut f13 = vk::PhysicalDeviceVulkan13Features::default().subgroup_size_control(true).compute_full_subgroups(true);
+        let mut f12 = vk::PhysicalDeviceVulkan12Features::default().shader_float16(true).shader_int8(true).storage_buffer8_bit_access(true).buffer_device_address(true).shader_buffer_int64_atomics(true).vulkan_memory_model(true).vulkan_memory_model_device_scope(true);
+        let mut f13 = vk::PhysicalDeviceVulkan13Features::default().subgroup_size_control(true).compute_full_subgroups(true).maintenance4(true);
         let mut fcm = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default().cooperative_matrix(true);
         let mut dev_exts = vec![];
         if has_coop_matrix { dev_exts.push(ash::khr::cooperative_matrix::NAME.as_ptr()); }

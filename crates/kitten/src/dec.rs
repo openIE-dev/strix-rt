@@ -98,6 +98,17 @@ unsafe fn dot4(a: [&[f32]; 4], b: &[f32]) -> [f32; 4] {
     for r in 0..4 { let mut t = [0f32; 8]; _mm256_storeu_ps(t.as_mut_ptr(), acc[r]); let mut s = ((t[0] + t[4]) + (t[1] + t[5])) + ((t[2] + t[6]) + (t[3] + t[7])); for j in i..k { s += a[r][j] * b[j] } out[r] = s; }
     out
 }
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn dot4(a: [&[f32]; 4], b: &[f32]) -> [f32; 4] {
+    // portable 4-lane dot; 4-wide accumulators so LLVM can keep NEON lanes busy
+    let k = b.len(); let mut out = [0f32; 4];
+    for r in 0..4 {
+        let ar = a[r]; let (mut s0, mut s1, mut s2, mut s3) = (0f32, 0f32, 0f32, 0f32); let mut i = 0;
+        while i + 4 <= k { s0 += ar[i] * b[i]; s1 += ar[i + 1] * b[i + 1]; s2 += ar[i + 2] * b[i + 2]; s3 += ar[i + 3] * b[i + 3]; i += 4; }
+        let mut s = (s0 + s1) + (s2 + s3); for j in i..k { s += ar[j] * b[j] } out[r] = s;
+    }
+    out
+}
 pub fn gemm_nt(a: &[f32], b: &[f32], m: usize, n: usize, k: usize, bias: Option<&[f32]>) -> Vec<f32> {
     let mut c = vec![0f32; m * n];
     let work = |rows: std::ops::Range<usize>, c: &mut [f32]| {
@@ -465,6 +476,17 @@ fn erf(x: f64) -> f64 { unsafe { c_erf(x) } }
 fn softmax(r: &mut [f32]) { let m = r.iter().cloned().fold(f32::NEG_INFINITY, f32::max); if m == f32::NEG_INFINITY { return } let mut s = 0.0; for p in r.iter_mut() { *p = (*p - m).exp(); s += *p } for p in r.iter_mut() { *p /= s } }
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
+unsafe fn sdpa_rows(q: &[f32], k: &[f32], v: &[f32], e: usize, s: usize, ev: usize, sc: f32, mrow: &dyn Fn(usize, usize) -> f32, mbool: bool, rows: std::ops::Range<usize>, out: &mut [f32]) {
+    let mut p = vec![0f32; s];
+    for (oi, i) in rows.enumerate() {
+        let qi = &q[i * e..i * e + e];
+        for j in 0..s { let kj = &k[j * e..j * e + e]; let mut d = 0f32; for t in 0..e { d += qi[t] * kj[t] } let mut x = d * sc; let mv = mrow(i, j); if mbool { if mv == 0.0 { x = f32::NEG_INFINITY } } else { x += mv } p[j] = x; }
+        softmax(&mut p);
+        let o = &mut out[oi * ev..oi * ev + ev]; o.fill(0.0);
+        for j in 0..s { let pj = p[j]; if pj == 0.0 { continue } let vj = &v[j * ev..j * ev + ev]; for t in 0..ev { o[t] += pj * vj[t] } }
+    }
+}
+#[cfg(not(target_arch = "x86_64"))]
 unsafe fn sdpa_rows(q: &[f32], k: &[f32], v: &[f32], e: usize, s: usize, ev: usize, sc: f32, mrow: &dyn Fn(usize, usize) -> f32, mbool: bool, rows: std::ops::Range<usize>, out: &mut [f32]) {
     let mut p = vec![0f32; s];
     for (oi, i) in rows.enumerate() {

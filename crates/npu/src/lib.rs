@@ -3,6 +3,7 @@
 use anyhow::{bail, Context, Result};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
+#[cfg(not(npu_stub))]
 extern "C" {
     fn npu_last_error() -> *const c_char;
     fn npu_open(dev: u32, xclbin: *const c_char, kname: *const c_char, instr: *const u32, n: usize) -> *mut c_void;
@@ -18,6 +19,28 @@ extern "C" {
     fn npu_bo_free(b: *mut c_void);
     fn npu_run(c: *mut c_void, a: *mut c_void, b: *mut c_void, o: *mut c_void) -> c_int;
 }
+
+#[cfg(npu_stub)]
+mod npu_stub_impl {
+    #![allow(unused_variables, clippy::missing_safety_doc)]
+    use std::ffi::{c_char, c_int, c_void};
+    static ERR: &[u8] = b"npu: built without XRT (stub backend, no NPU on this host)\0";
+    pub unsafe fn npu_last_error() -> *const c_char { ERR.as_ptr() as *const c_char }
+    pub unsafe fn npu_open(_d: u32, _x: *const c_char, _k: *const c_char, _i: *const u32, _n: usize) -> *mut c_void { std::ptr::null_mut() }
+    pub unsafe fn npu_close(_c: *mut c_void) {}
+    pub unsafe fn npu_bo_alloc(_c: *mut c_void, _s: usize, _a: c_int) -> *mut c_void { std::ptr::null_mut() }
+    pub unsafe fn npu_bo_userptr(_c: *mut c_void, _p: *mut c_void, _s: usize, _a: c_int) -> *mut c_void { std::ptr::null_mut() }
+    pub unsafe fn npu_bo_import_fd(_c: *mut c_void, _f: c_int) -> *mut c_void { std::ptr::null_mut() }
+    pub unsafe fn npu_bo_export_fd(_b: *mut c_void) -> c_int { -1 }
+    pub unsafe fn npu_bo_map(_b: *mut c_void) -> *mut c_void { std::ptr::null_mut() }
+    pub unsafe fn npu_bo_size(_b: *mut c_void) -> usize { 0 }
+    pub unsafe fn npu_bo_address(_b: *mut c_void) -> u64 { 0 }
+    pub unsafe fn npu_bo_sync(_b: *mut c_void, _t: c_int) -> c_int { -1 }
+    pub unsafe fn npu_bo_free(_b: *mut c_void) {}
+    pub unsafe fn npu_run(_c: *mut c_void, _a: *mut c_void, _b: *mut c_void, _o: *mut c_void) -> c_int { -1 }
+}
+#[cfg(npu_stub)]
+use npu_stub_impl::*;
 fn last_err() -> String { unsafe { CStr::from_ptr(npu_last_error()).to_string_lossy().into_owned() } }
 
 /// A loaded xclbin + instruction stream on a hardware context (one kernel, IRON GEMM argument convention:
