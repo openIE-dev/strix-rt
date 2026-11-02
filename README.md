@@ -131,7 +131,7 @@ We work in public, so this list will change as the logs come in.
   - the 6 vision test images behind that check (and the other image/video test inputs; media files were left out of this repo)
   - the Gemma 4 26B chat-prompt parity files (`logs/g4/26bc_prompt_ids.txt`, `26bc_vk_ids.txt`) used for the teacher-forced checks
   - the Laya decision-model golden outputs (`crates/laya/ref/golden.*`, too large for this snapshot)
-- **Energy receipts per decision:** `crates/receipt` (new) hashes each agent slice (domain-separated SHA-256), chains it to the previous receipt, signs it with ed25519, records compute and wait joules with their provenance, and checks incoming event envelopes against replay. Next: return these receipts from the `/v1/decisions` server and publish measured J/decision for the small decision models next to the hosted ones. See [docs/infinity-suspend-resume.md](docs/infinity-suspend-resume.md).
+- **Energy receipts per decision:** `crates/receipt` (new) hashes each agent slice (domain-separated SHA-256), chains it to the previous receipt, signs it with ed25519, records compute and wait joules with their provenance, and checks incoming event envelopes against replay. `kev_serve` now returns a signed receipt with every `/v1/decisions` response and appends it to a local ledger (`KEV_RECEIPT_KEY`, `KEV_RECEIPT_LEDGER`). Next: publish measured J/decision for the small decision models next to the hosted ones. See [docs/infinity-suspend-resume.md](docs/infinity-suspend-resume.md).
 - **Make it easier to copy:** fewer environment switches, one bench script per headline number, and a portable path for other RDNA parts if someone wants to try.
 
 ## License
