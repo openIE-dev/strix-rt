@@ -501,3 +501,40 @@ Energy: energy recorder differential, perf high, GPU lock, 3 repeats, windows >=
 | Kev-27B Q8_0 | 4/4, 0.0043 | 688 / 90 | 788 / 104 | |
 | Laya F16 | 9/9, 0.0006 | | | 16.0 / 1.9 |
 Jev: hosted closed model, not portable. ThinkThen: client; `thinkthen check` 8 ok against kev_serve (Kev and Laya).
+
+## Video and music generation energy (Oct 17, strix-rt only; details in docs/cosmos3.md)
+| workload | strix-rt (socket J, idle-subtracted, quiet box) | competing engine |
+|---|---|---|
+| Cosmos3-Nano 256x256x9, 8 steps, prompt = the fixed "red vintage car" prompt | ~630 J per clip as a fresh process (load 10-11 s included), ~412 J phases only; 18.3 s | diffusers ROCm bf16 was 1692 J for a different prompt (Oct 15, gross); not re-measured |
+| Cosmos3-Nano 704x1280x9, 12 steps | ~6370 J per clip (6320-6435), 78 s; ~6.2 kJ phases only | none measured |
+| YuE2-3B 30 s song, full pipeline (plan + semantic AR + NAR 32 steps + VAE) | ~4010 J per clip = 134 J per audio second (3996-4025), 66.4 s wall (0.46x real time) | torch CPU reference runs 445 s for the same clip, energy not measured |
+
+## Open neural-music models on this box (stock PyTorch ROCm, Oct 18)
+Net socket J per audio second, steady state, 30 s clips, quiet box, tools/energy/record.py windows: MusicGen-small 107-110 (41 s per clip), MusicGen-stereo-small 110-113, MusicGen-medium 457-466 (145 s per clip), ACE-Step 1.5 turbo 111 with the 1.7B LM and 87 DiT only (39 s and 26 s per clip), HeartMuLa-3B about 1013-1030 (343 s, includes one-time setup), strix-rt YuE2-3B (own Vulkan port) 134 (66 s). These are untuned eager PyTorch runs at about 80 W (CPU and launch bound), not an engine comparison. Stable Audio Open and Stable Audio 3 could not be downloaded (Hugging Face gated, no token).
+Stable Audio (Oct 18, same method, net socket J per audio second): SA3 small-music 1.98 (0.6 s per 30 s clip), SA3 medium 18.4 (6.3 s per clip), Stable Audio Open small 8.2 (11 s clips), Stable Audio Open 1.0 ~560 (141 s per clip). Eager PyTorch/ROCm, one seed, not listened to; SAO 1.0 had contaminated windows (neighbour builds).
+
+## Reflection Beam-1.0-501B-A23B (NVFP4, 273 GB, disk-streamed experts) - 2026-10-18
+strix-rt crates/beam: BF16 attention/dense/lm_head resident (~16 GB), NVFP4 experts pread from NVMe per token (8.7 GB/token). Correct first token (" Paris").
+Decode ~1.0-1.2 s/token cold, ~0.45 s/token with warm page cache; net energy 21-22 J/token warm (SMU socket, differential, quiet box). Disk-bound, not GPU-bound (GPU ~0.13 s/token).
+llama.cpp (b11718) loads the converted NVFP4 GGUF but produced garbage on CPU and OOMed on Vulkan, so no baseline. Details: docs/beam.md.
+
+### Beam update 2026-10-18 (prefetch/prefill)
+Sustained-cold (O_DIRECT) 1.4 s/token = NVMe bound (6.9 GB/s); warm page cache 0.4-0.5 s/token. Net J/token 21-33 warm, 31-53 cold (noisy; neighbour jobs on the box). Speculative expert prefetch predicts 79-87% of routed experts but does not speed up disk-bound decode. Batched prefill 1.3x on a 37-token prompt. See docs/beam.md.
+
+- Beam-501B phase 3 (disk-streaming, Strix Halo): 3-bit experts 0.89 tok/s (95.7% top-1 vs NVFP4), 2-bit 1.19 tok/s (74%, too lossy); per-layer GPU-visible LRU expert cache with 69-81 GB RAM: NVFP4 2.31 tok/s (hit 77%), 3-bit 2.69, 2-bit 4.78 tok/s, vs 0.72 uncached cold. See docs/beam.md.
+
+- Beam-501B cached energy (net socket, differential, warm-up excluded): NVFP4 uncached 45.8 J/token; +cache 30.8; 3-bit+cache 13.9 (0.25 s/tok); 2-bit+cache 10.0 (0.147 s/tok, quality-limited). Mixed 3/2-bit with 64 hot experts/layer: top-1 91.8% (KL .063) vs 2-bit 81.9% (KL .43), 3-bit 94.3%. See docs/beam.md Phase 4.
+
+- Beam 2-bit with activation-aware scales (calibrated on 6 prompts, tested on 6 other prompts): top-1 85.1% vs 81.9% data-free, KL .237 vs .433 (3-bit: 94.3%, .031). See docs/beam.md.
+
+## Decision models vs LLM cascades (Round 7, Oct 2026)
+
+Measured on Strix Halo (socket J/decision, gross; 800-item test of ag_news/sst5/mnli/boolq): Laya 1.9 J @0.750, Kev-0.8B 4.9 J @0.743, Kev-4B 18.9 J @0.804, Kev-9B Q8_0 26.4 J @0.828 vs a local zero-shot Qwen3.8-27B 65.3 J @0.782. FrugalGPT/RouteLLM/GreenGate-style cascades (small → LLM on low confidence) save 27–37% J/correct at thr 0.8–0.9 vs always-LLM, but here a fine-tuned System One model alone beats every cascade (−64% J/correct, +4.6 pts acc vs the LLM). Break-even escalation r* = 1 − e_s/e_l: 0.97 (Laya), 0.93 (Kev-0.8B), 0.71 (Kev-4B), 0.62 (Kev-9B). Caveat: in-domain eval for Kev; details in docs/decision_models.md Round 7.
+
+## Decision models, J/decision (strix-rt, Nov 2; see docs/decision_models.md)
+Median gross socket J/decision over ag/sst5/mnli/boolq: Laya 1.92, Kev-0.8B 4.90, Kev-4B 18.90, Kev-9B Q8_0 24.51, Kev-27B Q8_0 80.43 (1 clean rep), Qwen3.8-27B Q4_K_M zero-shot 65.29; joey-1 9.33, elephant-1 42.26. ML.ENERGY-format export: `logs/mlenergy/`.
+
+## Efficiency track results (Nov 2; full tables in docs/efficient-2026-10.md)
+- 1B-class decision models: the iGPU (Vulkan) runs at 2.6-2.7 J/decision vs 4.2-8.1 J on the NPU (FLM); about the same J/generated token (0.26-0.35).
+- Speculative decoding net J/token: Glimmer 30B 7.37->5.84 (DFlash), Qwen3.8 27B 7.36->4.84 (MTP3), gpt-oss 20B 0.94->1.15 (EAGLE3; worse).
+- Beam-501B ABM GEMV variants: no gain; MAC is 1.94 J/tok.

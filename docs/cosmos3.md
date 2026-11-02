@@ -141,3 +141,16 @@ Run: target-cos/release/cos --golden ~/cosmos_ref/g256 --stage tower|tf|run|sche
 - In-process 720p VAE after the 12-step denoise now works (COS_VAE_SAME=1: total 79 s, VAE 9.59 s, no ring timeout), so the earlier device loss was tied to the
   old im2col path in that state (3 of 3 failures there, 0 of 1 with implicit conv). Not proven: I did not re-run the old path in-process again to avoid another GPU reset.
   The exec workaround stays as the default.
+
+## Oct 17: measured energy per clip (end to end, fresh process per clip)
+Method: `logs/session3.sh` (wait for < 0.8 busy cores system-wide, gpu_lock, perf level high), `tools/energy/record.py record --hz 20 --idle 5` windows (SMU socket power; idle baseline of 5 s taken right before each window; net = window minus idle W x seconds), K clips back to back per window, 3 windows. Prompt: the fixed "red vintage car" prompt ("A red vintage car driving along a coastal road at sunset, with a lighthouse on a cliff in the distance"), seed 42, CFG 6. Each clip is a fresh `cos gen` process: weight load (10-12 s), prefix, denoise, then the exec-fresh-process VAE (the workaround; no device loss in 6 of 6 clips). Raw data: logs/cos/energy3_s256 and energy3_p720 (json, csv, logs); `ana.py` and `ph.py` summarise them.
+| clip | windows (K) | wall per clip | socket J per clip, net (windows) | gross J per clip | phases only (prefix+denoise+VAE), net | J / frame | J / Mpx-frame |
+|---|---|---|---|---|---|---|---|
+| 256x256x9, 8 steps | 2 clean x K=3 | 18.2-18.3 s | 626, 633 | 789-791 | about 412 J (denoise 298 J / 4.9 s, VAE 106 J / 2.4 s) | 70 | 1070 |
+| 704x1280x9, 12 steps | 3 x K=1 | 77.9-78.5 s | 6320, 6367, 6435 (median 6367) | 7009-7129 | about 6130-6240 J (denoise 5190-5280 J / 54.5 s, VAE 930-950 J / 12.4 s) | 707 | 785 |
+Caveats (read before quoting):
+- The 256 figure of 685 J from Oct 15 was a different prompt (kitchen), gross-ish and excluded process start; the comparable number for this prompt is ~412 J for the phases and ~630 J per clip including the 10-11 s weight load of a fresh process. A server that keeps the weights resident would pay roughly the phase figure.
+- Phase split is aligned from the CSV by the end time of the last clip (+/- 0.3 s), so it is approximate (about 5%); window totals come from tools/energy/record.py directly.
+- Discarded windows (not committed): one 256 window at 5.1 busy cores from other users gave 1039 J/clip net, two earlier sessions with neighbours building (idle baselines 28-104 W instead of ~9 W) gave 464-1843 J (256) and 2.9-6.3 kJ (720p) and are not trustworthy. The three valid 720p windows and two valid 256 windows ran at 0.2-0.7 average busy cores including our own process.
+- Socket power only (SMU), not wall power. The idle baseline at perf level high was 8.5-9 W on the quiet box.
+- Quality is unrelated to these joules: no pixel reference at 720p (see above); 256 parity unchanged.

@@ -1,0 +1,27 @@
+#version 450
+// BF16 GEMV: y[y_off+r] (+)= dot(W[r,:], x[x_off:]) ; one 256-thread workgroup per row, uvec4 (8 x bf16) loads. K % 8 == 0.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer W { uvec4 w[]; };
+layout(std430, binding = 1) readonly buffer X { float x[]; };
+layout(std430, binding = 2) buffer Y { float y[]; };
+layout(push_constant) uniform PC { uint n; uint k; uint w_off4; uint x_off; uint y_off; uint acc; } pc;
+shared float red[32];
+float lo(uint u) { return uintBitsToFloat(u << 16); }
+float hi(uint u) { return uintBitsToFloat(u & 0xffff0000u); }
+void main() {
+    uint r = gl_WorkGroupID.x; if (r >= pc.n) return;
+    uint t = gl_LocalInvocationID.x, k8 = pc.k >> 3;
+    uint base = pc.w_off4 + r * k8;
+    float s = 0.0;
+    for (uint j = t; j < k8; j += 256u) {
+        uvec4 v = w[base + j]; uint xo = pc.x_off + j * 8u;
+        s += lo(v.x) * x[xo] + hi(v.x) * x[xo + 1u] + lo(v.y) * x[xo + 2u] + hi(v.y) * x[xo + 3u]
+           + lo(v.z) * x[xo + 4u] + hi(v.z) * x[xo + 5u] + lo(v.w) * x[xo + 6u] + hi(v.w) * x[xo + 7u];
+    }
+    s = subgroupAdd(s);
+    if (gl_SubgroupInvocationID == 0u) red[gl_SubgroupID] = s;
+    barrier();
+    if (t == 0u) { float tot = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) tot += red[i];
+        if (pc.acc != 0u) y[pc.y_off + r] += tot; else y[pc.y_off + r] = tot; }
+}

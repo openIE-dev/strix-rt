@@ -229,8 +229,8 @@ impl Pf {
             let k = &self.k["facmp"]; let ds = self.ds.get(ctx, k, &[bufs[3], sc, out])?; ctx.dispatch(cb, k, ds, &push_u32(&[n, i % 4096]), 64);
             return Ok(());
         }
-        // head-dim-256 causal attention: coopmat flash attention (default on since fa8/fa9 acceptance; PF_FA=0 -> scalar pf_attn) for prompts >= PF_FA_M tokens
-        let (name, groups) = if name == "attn" && env("PF_FA", 1) == 1 && push[8] >= env("PF_FA_M", 1) { ("attnfa", push[8].div_ceil(64) * push[0]) }
+        // head-dim-256 causal attention: coopmat flash attention (default on since fa8/fa9 acceptance; PF_FA=0 -> scalar pf_attn) for prompts >= PF_FA_M tokens (an instance that registers "attn_nofa" keeps its own "attn" kernel, e.g. kev Base Labs bidirectional attention)
+        let (name, groups) = if name == "attn" && !self.k.contains_key("attn_nofa") && env("PF_FA", 1) == 1 && push[8] >= env("PF_FA_M", 1) { ("attnfa", push[8].div_ceil(64) * push[0]) }
             else if name == "attn64" && env("PF_FA64", 0) == 1 { ("attnfa64", push[7].div_ceil(64) * push[0]) } else { (name, groups) };
         let k = &self.k[name]; let ds = self.ds.get(ctx, k, bufs)?; ctx.dispatch(cb, k, ds, &push_u32(push), groups); Ok(())
     }

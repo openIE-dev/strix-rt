@@ -1,0 +1,69 @@
+// kev copy of prefill/pf_attn.comp with the causal mask removed inside the chunk (Base Labs block_bidirectional full attention)
+#version 450
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_control_flow_attributes : require
+// Batched causal GQA attention over the f16 KV cache, head dim 256. Workgroup = (block of 16 tokens, q head):
+// thread = (token r = tid/16, dim slice p = tid%16 covering 16 dims). Keys/values staged 32 at a time in shared memory.
+// Online softmax in f32; output gated by sigmoid(gate) and written f16 to A[t][h*256 + d].
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer Q { float qkv[]; };
+layout(std430, binding = 1) readonly buffer KC { uvec4 kc[]; };
+layout(std430, binding = 2) readonly buffer VC { uvec4 vc[]; };
+layout(std430, binding = 3) writeonly buffer A { float16_t a[]; };
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; uint q_stride; uint pos0; float scale; uint ldp; uint lda; uint M; } pc;
+const uint D = 256u, TB = 16u, KB = 32u;
+shared uvec4 Ks[KB][32]; shared uvec4 Vs[KB][32];
+vec2 u2(uint x) { return unpackHalf2x16(x); }
+void main() {
+    uint nb = (pc.M + TB - 1u) / TB;
+    uint g = gl_WorkGroupID.x + gl_WorkGroupID.y * gl_NumWorkGroups.x;
+    uint h = g % pc.n_head, tb = g / pc.n_head, tid = gl_LocalInvocationID.x;
+    uint r = tid >> 4, p = tid & 15u, t = tb * TB + r;
+    uint kvh = h / (pc.n_head / pc.n_kv);
+    bool ok = t < pc.M;
+    uint tq = min(t, pc.M - 1u), mypos = pc.pos0 + tq;
+    float q[16];
+    uint qb = tq * pc.ldp + h * pc.q_stride + p * 16u;
+    [[unroll]] for (uint d = 0u; d < 16u; d++) q[d] = qkv[qb + d] * pc.scale;
+    float acc[16]; [[unroll]] for (uint d = 0u; d < 16u; d++) acc[d] = 0.0;
+    float m = -1e30, l = 0.0;
+    uint last = pc.pos0 + pc.M - 1u; // block-bidirectional: every row sees the whole chunk
+    uint kvbase4 = (pc.cache_off + kvh * D) / 8u, rowstride4 = pc.n_kv * D / 8u;
+    for (uint k0 = 0u; k0 <= last; k0 += KB) {
+        barrier();
+        for (uint e = tid; e < KB * 32u; e += 256u) {
+            uint j = e >> 5, c = e & 31u, kp = k0 + j;
+            uvec4 kv = uvec4(0u), vv = uvec4(0u);
+            if (kp <= last) { uint ix = kvbase4 + kp * rowstride4 + c; kv = kc[ix]; vv = vc[ix]; }
+            Ks[j][c] = kv; Vs[j][c] = vv;
+        }
+        barrier();
+        uint jn = min(KB, last + 1u - k0);
+        for (uint j = 0u; j < jn; j++) {
+            uvec4 ka = Ks[j][2u * p], kb = Ks[j][2u * p + 1u];
+            vec2 k01 = u2(ka.x), k23 = u2(ka.y), k45 = u2(ka.z), k67 = u2(ka.w), k89 = u2(kb.x), kab = u2(kb.y), kcd = u2(kb.z), kef = u2(kb.w);
+            float s = q[0]*k01.x + q[1]*k01.y + q[2]*k23.x + q[3]*k23.y + q[4]*k45.x + q[5]*k45.y + q[6]*k67.x + q[7]*k67.y
+                    + q[8]*k89.x + q[9]*k89.y + q[10]*kab.x + q[11]*kab.y + q[12]*kcd.x + q[13]*kcd.y + q[14]*kef.x + q[15]*kef.y;
+            s += subgroupShuffleXor(s, 8u); s += subgroupShuffleXor(s, 4u); s += subgroupShuffleXor(s, 2u); s += subgroupShuffleXor(s, 1u);
+            if (true) {
+                float mn = max(m, s), cr = exp(m - mn), pe = exp(s - mn);
+                l = l * cr + pe; m = mn;
+                uvec4 va = Vs[j][2u * p], vb = Vs[j][2u * p + 1u];
+                vec2 v0 = u2(va.x), v1 = u2(va.y), v2 = u2(va.z), v3 = u2(va.w), v4 = u2(vb.x), v5 = u2(vb.y), v6 = u2(vb.z), v7 = u2(vb.w);
+                acc[0] = acc[0]*cr + pe*v0.x; acc[1] = acc[1]*cr + pe*v0.y; acc[2] = acc[2]*cr + pe*v1.x; acc[3] = acc[3]*cr + pe*v1.y;
+                acc[4] = acc[4]*cr + pe*v2.x; acc[5] = acc[5]*cr + pe*v2.y; acc[6] = acc[6]*cr + pe*v3.x; acc[7] = acc[7]*cr + pe*v3.y;
+                acc[8] = acc[8]*cr + pe*v4.x; acc[9] = acc[9]*cr + pe*v4.y; acc[10] = acc[10]*cr + pe*v5.x; acc[11] = acc[11]*cr + pe*v5.y;
+                acc[12] = acc[12]*cr + pe*v6.x; acc[13] = acc[13]*cr + pe*v6.y; acc[14] = acc[14]*cr + pe*v7.x; acc[15] = acc[15]*cr + pe*v7.y;
+            }
+        }
+    }
+    if (ok) {
+        uint gb = t * pc.ldp + h * pc.q_stride + D + p * 16u, ob = t * pc.lda + h * D + p * 16u;
+        float il = 1.0 / l;
+        [[unroll]] for (uint d = 0u; d < 16u; d++) { float gt = qkv[gb + d]; a[ob + d] = float16_t(acc[d] * il / (1.0 + exp(-gt))); }
+    }
+}

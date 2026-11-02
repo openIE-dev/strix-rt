@@ -1,0 +1,343 @@
+{
+  "breakdown": {
+    "channels": [
+      {
+        "avg_w": 54.34335171388713,
+        "baseline_w": 9.87440982645934,
+        "extra": null,
+        "fabric": "cpu_package",
+        "joules": 4546.354944000002,
+        "kind": "counter",
+        "net_joules": 3720.2636095905796,
+        "source": "powercap intel-rapl:0 (RAPL package MSR 0xC001029B)"
+      },
+      {
+        "avg_w": 3.0131960529639588,
+        "baseline_w": 0.33913270403848234,
+        "extra": {
+          "per_core_j": [
+            114.47129821777344,
+            2.23516845703125,
+            2.37298583984375,
+            1.2722015380859375,
+            0.561920166015625,
+            0.56842041015625,
+            2.1548004150390625,
+            3.3675384521484375,
+            3.5793914794921875,
+            2.885650634765625,
+            2.6497955322265625,
+            110.20318603515625,
+            3.1443939208984375,
+            0.838043212890625,
+            1.24127197265625,
+            0.5373687744140625
+          ]
+        },
+        "fabric": "cpu_cores",
+        "joules": 252.08343505859375,
+        "kind": "counter",
+        "net_joules": 223.71165457300694,
+        "source": "MSR 0xC001029A summed over physical cores"
+      },
+      {
+        "avg_w": 3.0029117891327997,
+        "baseline_w": 0.3160614568746384,
+        "extra": null,
+        "fabric": "cpu_cores_smu",
+        "joules": 251.2230554125175,
+        "kind": "power-integrated",
+        "net_joules": 224.78141127847238,
+        "source": "gpu_metrics average_all_core_power"
+      },
+      {
+        "avg_w": 0.04025067300171659,
+        "baseline_w": 0.02154546205032496,
+        "extra": null,
+        "fabric": "cpu_core_zone",
+        "joules": 3.3673639999999967,
+        "kind": "counter",
+        "net_joules": 1.5648745542077178,
+        "source": "powercap intel-rapl:0:0 (one core's energy MSR)"
+      },
+      {
+        "avg_w": 19.06056567363267,
+        "baseline_w": 0.0010511131682238582,
+        "extra": null,
+        "fabric": "gfx",
+        "joules": 1594.60346579271,
+        "kind": "power-integrated",
+        "net_joules": 1594.5155298557768,
+        "source": "gpu_metrics average_gfx_power"
+      },
+      {
+        "avg_w": 0.0,
+        "baseline_w": 0.0,
+        "extra": null,
+        "fabric": "npu",
+        "joules": 0.0,
+        "kind": "power-integrated",
+        "net_joules": 0.0,
+        "source": "gpu_metrics average_ipu_power"
+      },
+      {
+        "avg_w": 32.301568885885715,
+        "baseline_w": 9.06387398505127,
+        "extra": null,
+        "fabric": "soc_other",
+        "joules": 2702.343392002731,
+        "kind": "power-integrated",
+        "net_joules": 1944.0613390170208,
+        "source": "socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual)"
+      },
+      {
+        "avg_w": 54.3650463486511,
+        "baseline_w": 9.380986555094127,
+        "extra": null,
+        "fabric": "socket",
+        "joules": 4548.169913207951,
+        "kind": "power-integrated",
+        "net_joules": 3763.358280151263,
+        "source": "gpu_metrics average_socket_power (SMU)"
+      },
+      {
+        "avg_w": 53.79335332092661,
+        "baseline_w": 8.96777628689162,
+        "extra": null,
+        "fabric": "ppt_hwmon",
+        "joules": 4500.342178239934,
+        "kind": "power-integrated",
+        "net_joules": 3750.099641245717,
+        "source": "amdgpu hwmon power1_input (PPT)"
+      },
+      {
+        "avg_w": null,
+        "baseline_w": null,
+        "extra": {
+          "mean_dram_reads_raw": 37284.53106332139,
+          "mean_dram_writes_raw": 1700.473715651135,
+          "mean_fclk_mhz": 2000.0,
+          "mean_uclk_mhz": 1000.0,
+          "note": "no memory power sensor; memory/DF power is inside soc_other"
+        },
+        "fabric": "memory_df",
+        "joules": null,
+        "kind": "activity",
+        "net_joules": null,
+        "source": "gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor)"
+      },
+      {
+        "avg_w": null,
+        "baseline_w": null,
+        "extra": {
+          "max_temp_c": 45.85,
+          "mean_temp_c": 45.58894862604534
+        },
+        "fabric": "nvme",
+        "joules": null,
+        "kind": "activity",
+        "net_joules": null,
+        "source": "nvme hwmon temp (no power sensor; see docs for PS table)"
+      },
+      {
+        "avg_w": null,
+        "baseline_w": null,
+        "extra": {
+          "max_temp_gfx_c": 66.62,
+          "mean_gfx_activity_pct": 33.51911589008363,
+          "mean_gfxclk_mhz": 2899.1810035842295,
+          "mean_ipuclk_mhz": 0.0,
+          "mean_npu_activity_pct": 0.0
+        },
+        "fabric": "other",
+        "joules": null,
+        "kind": "activity",
+        "net_joules": null,
+        "source": "activity/clocks/temps from gpu_metrics"
+      }
+    ],
+    "eff_hz": 19.997652743175948,
+    "samples": 1674,
+    "seconds": 83.659818554
+  },
+  "cmd": [
+    "python3",
+    "tools/cascade/cascade_run.py",
+    "run",
+    "--tier",
+    "t1",
+    "--url",
+    "http://127.0.0.1:8110",
+    "--model",
+    "kev-9b",
+    "--ds",
+    "mnli",
+    "--lo",
+    "0",
+    "--hi",
+    "100",
+    "--passes",
+    "2"
+  ],
+  "idle_baseline": {
+    "channels": [
+      {
+        "avg_w": 9.87440982645934,
+        "baseline_w": null,
+        "extra": null,
+        "fabric": "cpu_package",
+        "joules": 49.376490000000004,
+        "kind": "counter",
+        "net_joules": null,
+        "source": "powercap intel-rapl:0 (RAPL package MSR 0xC001029B)"
+      },
+      {
+        "avg_w": 0.33913270403848234,
+        "baseline_w": null,
+        "extra": {
+          "per_core_j": [
+            0.9826507568359375,
+            0.0503692626953125,
+            0.037445068359375,
+            0.0041656494140625,
+            0.0027008056640625,
+            0.0027313232421875,
+            0.207489013671875,
+            0.107940673828125,
+            0.06414794921875,
+            0.0778961181640625,
+            0.0565338134765625,
+            0.0576019287109375,
+            0.0035552978515625,
+            0.0302581787109375,
+            0.0075225830078125,
+            0.0028076171875
+          ]
+        },
+        "fabric": "cpu_cores",
+        "joules": 1.6958160400390625,
+        "kind": "counter",
+        "net_joules": null,
+        "source": "MSR 0xC001029A summed over physical cores"
+      },
+      {
+        "avg_w": 0.3160614568746384,
+        "baseline_w": null,
+        "extra": null,
+        "fabric": "cpu_cores_smu",
+        "joules": 1.5804494282724995,
+        "kind": "power-integrated",
+        "net_joules": null,
+        "source": "gpu_metrics average_all_core_power"
+      },
+      {
+        "avg_w": 0.02154546205032496,
+        "baseline_w": null,
+        "extra": null,
+        "fabric": "cpu_core_zone",
+        "joules": 0.10773700000000001,
+        "kind": "counter",
+        "net_joules": null,
+        "source": "powercap intel-rapl:0:0 (one core's energy MSR)"
+      },
+      {
+        "avg_w": 0.0010511131682238582,
+        "baseline_w": null,
+        "extra": null,
+        "fabric": "gfx",
+        "joules": 0.005256038563500002,
+        "kind": "power-integrated",
+        "net_joules": null,
+        "source": "gpu_metrics average_gfx_power"
+      },
+      {
+        "avg_w": 0.0,
+        "baseline_w": null,
+        "extra": null,
+        "fabric": "npu",
+        "joules": 0.0,
+        "kind": "power-integrated",
+        "net_joules": null,
+        "source": "gpu_metrics average_ipu_power"
+      },
+      {
+        "avg_w": 9.06387398505127,
+        "baseline_w": null,
+        "extra": null,
+        "fabric": "soc_other",
+        "joules": 45.323446266623016,
+        "kind": "power-integrated",
+        "net_joules": null,
+        "source": "socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual)"
+      },
+      {
+        "avg_w": 9.380986555094127,
+        "baseline_w": null,
+        "extra": null,
+        "fabric": "socket",
+        "joules": 46.90915173345899,
+        "kind": "power-integrated",
+        "net_joules": null,
+        "source": "gpu_metrics average_socket_power (SMU)"
+      },
+      {
+        "avg_w": 8.96777628689162,
+        "baseline_w": null,
+        "extra": null,
+        "fabric": "ppt_hwmon",
+        "joules": 44.84291455732649,
+        "kind": "power-integrated",
+        "net_joules": null,
+        "source": "amdgpu hwmon power1_input (PPT)"
+      },
+      {
+        "avg_w": null,
+        "baseline_w": null,
+        "extra": {
+          "mean_dram_reads_raw": 1139.4851485148515,
+          "mean_dram_writes_raw": 20.366336633663366,
+          "mean_fclk_mhz": 2000.0,
+          "mean_uclk_mhz": 1000.0,
+          "note": "no memory power sensor; memory/DF power is inside soc_other"
+        },
+        "fabric": "memory_df",
+        "joules": null,
+        "kind": "activity",
+        "net_joules": null,
+        "source": "gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor)"
+      },
+      {
+        "avg_w": null,
+        "baseline_w": null,
+        "extra": {
+          "max_temp_c": 45.85,
+          "mean_temp_c": 44.89950495049503
+        },
+        "fabric": "nvme",
+        "joules": null,
+        "kind": "activity",
+        "net_joules": null,
+        "source": "nvme hwmon temp (no power sensor; see docs for PS table)"
+      },
+      {
+        "avg_w": null,
+        "baseline_w": null,
+        "extra": {
+          "max_temp_gfx_c": 45.62,
+          "mean_gfx_activity_pct": 0.0,
+          "mean_gfxclk_mhz": 2900.0,
+          "mean_ipuclk_mhz": 0.0,
+          "mean_npu_activity_pct": 0.0
+        },
+        "fabric": "other",
+        "joules": null,
+        "kind": "activity",
+        "net_joules": null,
+        "source": "activity/clocks/temps from gpu_metrics"
+      }
+    ],
+    "eff_hz": 19.9982012217947,
+    "samples": 101,
+    "seconds": 5.000449735
+  }
+}

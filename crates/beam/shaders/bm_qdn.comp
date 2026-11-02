@@ -1,0 +1,26 @@
+#version 450
+// Routed-expert down projection (B-bit), summed over selected experts with routing weights. N=5120, K=2560.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(constant_id = 0) const uint BITS0 = 2;
+layout(constant_id = 1) const uint MIXED = 0;
+layout(constant_id = 2) const uint ABM = 0;
+layout(std430, binding = 0) readonly buffer SW { uint cw[]; };
+layout(std430, binding = 1) readonly buffer SS { uint ss[]; };
+layout(std430, binding = 2) readonly buffer X { float x[]; };
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+layout(std430, binding = 4) readonly buffer M { float meta[]; };
+layout(push_constant) uniform PC { uint n; uint k; uint slot_bytes; uint wproj_bytes; uint s_base; uint sproj_bytes; uint topk; } pc;
+#include "qcommon.glsl"
+void main() {
+    uint r = gl_WorkGroupID.x * 8u + gl_SubgroupID, ln = gl_SubgroupInvocationID;
+    if (r >= pc.n) return;
+    uint kg = pc.k >> 5; float tot = 0.0;
+    for (uint e = 0u; e < pc.topk; e++) {
+        uint sb = floatBitsToUint(meta[e * 8u + 4u]) * pc.slot_bytes; uint BITS = MIXED != 0u ? floatBitsToUint(meta[e * 8u + 5u]) : BITS0; uint dw = sb >> 2, ds = sb + (MIXED != 0u ? 3u * 1638400u * BITS : pc.s_base); float a = 0.0;
+        for (uint j = ln; j < kg; j += 32u) a += qdot32(dw + (r * kg + j) * BITS, scale16(ds + (r * kg + j) * 2u), e * pc.k + j * 32u, BITS);
+        tot += subgroupAdd(a) * meta[e * 8u + 3u];
+    }
+    if (subgroupElect()) y[r] = tot;
+}

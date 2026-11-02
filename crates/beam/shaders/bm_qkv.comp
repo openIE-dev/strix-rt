@@ -1,0 +1,34 @@
+#version 450
+// Per-head q/k RMSnorm (+NeoX RoPE on sliding layers, query temperature scale on NoPE layers), K/V cache write.
+// QKV buffer layout (floats): q[48*128] | k[8*128] | v[8*128] | gate[48*128]. WG h<48: q head, 48..55: k head, 56..63: v head.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 128) in;
+layout(std430, binding = 0) buffer QKV { float qkv[]; };
+layout(std430, binding = 1) buffer KC { float kc[]; };
+layout(std430, binding = 2) buffer VC { float vc[]; };
+layout(std430, binding = 3) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint pos; uint rope; float qscale; uint kv_off; uint qn_off; uint kn_off; float theta; float eps; } pc;
+shared float red[32]; shared float sh[128];
+void main() {
+    uint h = gl_WorkGroupID.x, t = gl_LocalInvocationID.x;
+    if (h >= 56u) { // v head: copy
+        uint kvh = h - 56u; vc[pc.kv_off + pc.pos * 1024u + kvh * 128u + t] = qkv[6144u + 1024u + kvh * 128u + t]; return; }
+    bool isq = h < 48u;
+    uint src = isq ? h * 128u : 6144u + (h - 48u) * 128u;
+    float v = qkv[src + t];
+    float s = subgroupAdd(v * v);
+    if (gl_SubgroupInvocationID == 0u) red[gl_SubgroupID] = s;
+    barrier();
+    float tot = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) tot += red[i];
+    float sc = inversesqrt(tot / 128.0 + pc.eps);
+    v = v * sc * f32w[(isq ? pc.qn_off : pc.kn_off) + t];
+    float o = v;
+    if (pc.rope != 0u) {
+        sh[t] = v; barrier();
+        uint i = t & 63u; float freq = pow(pc.theta, -float(2u * i) / 128.0); float ang = float(pc.pos) * freq;
+        float c = cos(ang), sn = sin(ang);
+        o = (t < 64u) ? sh[t] * c - sh[t + 64u] * sn : sh[t] * c + sh[t - 64u] * sn;
+    }
+    if (isq) { qkv[src + t] = o * pc.qscale; }
+    else { kc[pc.kv_off + pc.pos * 1024u + (h - 48u) * 128u + t] = o; }
+}

@@ -1,0 +1,41 @@
+#version 450
+// Decode attention, one workgroup per query head (GQA 6:1), then sigmoid output gate: out = attn * sigmoid(gate + bias[head]).
+#extension GL_KHR_shader_subgroup_arithmetic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer QKV { float qkv[]; };
+layout(std430, binding = 1) readonly buffer KC { float kc[]; };
+layout(std430, binding = 2) readonly buffer VC { float vc[]; };
+layout(std430, binding = 3) writeonly buffer AO { float ao[]; };
+layout(std430, binding = 4) readonly buffer F { float f32w[]; };
+layout(push_constant) uniform PC { uint pos; uint lo; uint kv_off; uint gb_off; float scale; } pc;
+shared float q[128]; shared float sc[4096]; shared float red[32]; shared float part[256];
+void main() {
+    uint hd = gl_WorkGroupID.x, t = gl_LocalInvocationID.x, kvh = hd / 6u;
+    if (t < 128u) q[t] = qkv[hd * 128u + t];
+    barrier();
+    uint n = pc.pos + 1u - pc.lo; float mx = -3.0e38;
+    for (uint j = t; j < n; j += 256u) {
+        uint p = pc.lo + j; uint b = pc.kv_off + p * 1024u + kvh * 128u; float d = 0.0;
+        for (uint i = 0u; i < 128u; i++) d += q[i] * kc[b + i];
+        d *= pc.scale; sc[j] = d; mx = max(mx, d);
+    }
+    mx = subgroupMax(mx);
+    if (gl_SubgroupInvocationID == 0u) red[gl_SubgroupID] = mx;
+    barrier();
+    float m = -3.0e38; for (uint i = 0u; i < gl_NumSubgroups; i++) m = max(m, red[i]);
+    barrier();
+    float sm = 0.0;
+    for (uint j = t; j < n; j += 256u) { float e = exp(sc[j] - m); sc[j] = e; sm += e; }
+    sm = subgroupAdd(sm);
+    if (gl_SubgroupInvocationID == 0u) red[gl_SubgroupID] = sm;
+    barrier();
+    float den = 0.0; for (uint i = 0u; i < gl_NumSubgroups; i++) den += red[i];
+    uint d = t & 127u, half_ = t >> 7; float acc = 0.0;
+    for (uint j = half_; j < n; j += 2u) acc += sc[j] * vc[pc.kv_off + (pc.lo + j) * 1024u + kvh * 128u + d];
+    part[t] = acc; barrier();
+    if (t < 128u) {
+        float o = (part[t] + part[t + 128u]) / den;
+        float g = qkv[6144u + 1024u + 1024u + hd * 128u + t] + f32w[pc.gb_off + hd];
+        ao[hd * 128u + t] = o * (1.0 / (1.0 + exp(-g)));
+    }
+}

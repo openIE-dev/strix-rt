@@ -86,3 +86,77 @@ Jev is closed/hosted: no port or measurement possible. ThinkThen is a client; wo
 | Kev-9B bf16 | 276 / 26.3 | 314 / 31.4 | ~4.7 socket, ~0.6 gfx |
 | Kev-27B Q8_0 | 688 / 90.1 | 788 / 104.1 | ~12.5 socket, ~1.7 gfx (spread across 3 runs only ~3%, the cleanest set) |
 The 27B runs (wall-clock 40+ s each) were tight; smaller models were noisier because other workers loaded the CPU. Not measured: Kev-0.8B/4B/9B/27B parity re-run this round (last parity: round 2/4 above, unchanged code except GPU kernels since; a re-run is still owed).
+
+## Round 6: parity re-run after kernel changes (2026-10-17)
+Same goldens and scripts (`logs/dm_parity.sh`, logs in logs/dm/parity/), GPU lock, fresh `cargo build --release -p kev -p laya`. No regression, no code change.
+| model | argmax (was) | argmax (now) | worst max abs dprob (was -> now) | min hidden cos (now) |
+|---|---|---|---|---|
+| Kev-0.8B bf16 | 4/4 | 4/4 | 0.0051 -> 0.0052 | 0.999996 |
+| Kev-4B bf16 | 4/4 | 4/4 | 0.0006 -> 0.0009 | 0.999998 |
+| Kev-9B Q8_0 | 4/4 | 4/4 | 0.0125 -> 0.0126 | 0.999907 |
+| Kev-9B bf16 | 4/4 | 4/4 | 0.0009 -> 0.0007 | 0.999997 |
+| Kev-27B Q8_0 | 4/4 | 4/4 | 0.0043 -> 0.0043 | 0.999903 |
+| Laya F16 (laya_parity, 9 rows) | 9/9 | 9/9 | 0.0006 -> 0.0006 | 0.961 (same single outlier token as before) |
+| Laya via laya_check vs Agent.system_one (3 states) | max|d| 0.0022 | max|d| 0.0022, no mismatches | | |
+The 4B figure moved 0.0006 -> 0.0009 (0.0009 is also what the older round-4 bf16-9B note lists); all changes are at the 1e-4 level and far below argmax-relevant size.
+
+## Round 7 — cascade/router harness, measured energy (Oct 2026)
+
+Harness: `tools/cascade/` (eval.jsonl = 1000 items: ag_news, sst5, mnli, boolq; dev = first 50/dataset for temperature refit, test = 800). Tier 1 = System One (kev_serve), tier 2 = Qwen3.8-27B Q4_K_M zero-shot (first-token letter logprobs). Energy = SMU socket differential (two pass counts, same 100 items), quiet gate + gpu_lock, 3 repeats, median; windows with >1.5 avg busy cores dropped. Full output: `logs/cascade/analysis.md`.
+
+| model | test acc | ECE (refit) | J/decision gross (net) | wall s/dec |
+|---|---|---|---|---|
+| Laya | 0.750 | 0.037 | 1.92 (1.66) | – |
+| Kev-0.8B | 0.743 | 0.039 | 4.90 (3.61) | ~0.14 |
+| Kev-4B | 0.804 | 0.020 | 18.90 (14.76) | ~0.45 |
+| Kev-9B Q8_0 | 0.828 | 0.038 | 26.39 (20.34) | – |
+| Kev-27B (tier-2 alt) | 0.833 | 0.029 | 80.43 (66.39); all 4 datasets, 3 reps run but only 1 clean rep per dataset (3 windows dropped, 11-16 busy cores) | ~1.4 |
+| Qwen3.8-27B (tier 2) | 0.782 | 0.114 | 65.28 (59.94) | ~0.5–0.8 |
+
+Cascade (gross J, test n=800; always-large = Qwen alone 0.782 acc, 65.3 J/dec, 83.4 J/correct):
+
+| tier1 → Qwen | thr | escalated | acc | J/dec | J/correct vs large | break-even r* |
+|---|---|---|---|---|---|---|
+| Laya | 0.9 | 0.713 | 0.790 | 48.5 | −26.5% | 0.971 |
+| Kev-0.8B | 0.8 | 0.593 | 0.792 | 41.8 | −36.8% | 0.925 |
+| Kev-4B | 0.8 | 0.417 | 0.809 | 43.9 | −35.0% | 0.711 |
+| Kev-9B Q8_0 | 0.8 | 0.380 | 0.815 | 46.5 | −31.6% | 0.624 |
+| Kev-9B Q8_0 | 0 (never escalate) | 0 | 0.828 | 24.5 | −64.5% | – |
+| oracle Laya→Qwen | – | 0.250 | 0.896 | 17.4 | −76.7% | – |
+
+Findings: (1) On this in-domain eval the zero-shot 27B LLM is a weaker tier 2 than the fine-tuned System One models, so escalating to it lowers accuracy for Kev-4B/9B; always-small Kev-9B dominates every cascade on both accuracy and J. (2) Cascades beat always-large in J/correct up to thr≈0.9–0.97 (break-even escalation 0.62–0.97). (3) The oracle gap (0.89 acc at ~17–35 J) shows routing quality, not tier cost, is the bottleneck — max-prob confidence is a weak router. (4) Laya is the cheapest tier 1 (1.9 J/dec, ~34x below Qwen). Kev-27B as tier 2 (Nov 2): 0.833 acc at 80.43 J/dec gross, so Kev-9B alone (0.828, 24.51) costs 3.3x less for -0.005 acc.
+Caveats: eval in-domain for Kev; per-decision cost includes per-request state prefill (one question per request); gross includes idle; Kev-9B and Laya maxed 5.6/4.4 busy cores in some windows (kept, below drop rule only partially — see analysis.md); cascade energy is predicted from per-tier costs (live val windows not run); router overhead assumed 0.
+
+## Round: Base Labs, /v1/decisions floor, router probe (Oct 30-Nov 2)
+Script: `tools/baselabs/bl_analyze.py`. Socket differential, quiet gate + gpu_lock, median of 3.
+| Model / setup | J/dec gross | J/dec net | ms/dec | parity |
+|---|---|---|---|---|
+| joey-1 bf16 (block-bidirectional) | 9.33 [9.11-9.75] | 7.82 | 154 | 100/100, max dlogit 0.0016 |
+| elephant-1 bf16 | 42.26 [41.29-61.13; r1 at 102 W, likely contaminated] | 36.20 | 672 | 16/16, max dlogit 0.0018 |
+| kev-0.8b /v1/decisions, 8 questions/request | 0.66 | 0.52 | 16 | - |
+| kev-0.8b /v1/decisions, 1 question/request | 4.18 | 2.73 | 115 | - |
+Hidden-state probe vs confidence (AUROC predicting tier-1 wrong; confidence / probe dev / probe oof): kev08 0.801/0.563/0.742, kev4b 0.817/0.785/0.739, kev9q8 0.810/0.635/0.758. Confidence routing is as good as the probe.
+Idle power (server loaded vs none): NOT measured. All 9 windows so far were contaminated by other CPU jobs (8.7-79 W).
+
+## Round: open-weight rival decision models (Nov 2, 2026; in progress)
+
+Same harness as Round 7 (tools/cascade, 1000 items = 250 each of ag_news/sst5/mnli/boolq; test = 800, dev = first 50/ds for the temperature refit). Rivals are served by upstream llama-server `/v1/systemone` on Vulkan (~/llama-latest e36df6047), not kev_serve.
+
+Accuracy (all 1000 items; analyze.py test-split numbers in parentheses):
+
+| model | file | acc all | ag_news | sst5 | mnli | boolq | ECE refit (test) |
+|---|---|---|---|---|---|---|---|
+| vLLM-SR d3-edge | ggml-org/vllm-d3-edge-GGUF BF16 | 0.690 (0.688) | 0.840 | 0.400 | 0.804 | 0.716 | 0.042 |
+| vLLM-SR d3-lite | ggml-org/vllm-d3-lite-GGUF BF16 | 0.742 (0.738) | 0.852 | 0.452 | 0.840 | 0.824 | 0.028 |
+| vLLM-SR d3-flash | ggml-org/vllm-d3-flash-GGUF Q8_0 | 0.819 (0.819) | 0.884 | 0.564 | 0.892 | 0.936 | 0.024 |
+| Kev-0.8B (ref) | | 0.749 (0.743) | 0.904 | 0.512 | 0.780 | 0.800 | 0.039 |
+| Kev-9B Q8 (ref) | | 0.822 (0.828) | 0.920 | 0.588 | 0.876 | 0.904 | 0.038 |
+
+Energy (e1 batch 1, 3 reps; b8 floor protocol, 8 noul q/state K=8 vs K=1, 2 reps) is queued behind gpu_lock (idle-power loop, then codebook job): tools/cascade/rivals_chain.sh, rivals_chain2.sh, rivals_chain3.sh. Results land in logs/cascade/energy and logs/cascade/b8.
+
+Notes:
+- pplx-decider-flash v1.2: the published GGUF (perplexity-ai/pplx-decider-flash-gguf-v1.2) has only `pplx_decider.*` keys and no `qwen35.decision.type`, so llama-server returns 501 on /v1/systemone. Re-converted from perplexity-ai/pplx-decider-flash-v1.2 safetensors with llama.cpp master (3f8af15a7) convert_hf_to_gguf --outtype q8_0 -> pplx-flash-v1.2-conv-Q8_0.gguf (chain2).
+- pplx-decider v1.2 27B: no GGUF published; converted the same way (chain3) after download.
+- Drex Max v1: nace-ai/drex-max-v1-Q8_0, served with the nace-ai/llama.cpp fork branch drex-max-v1 (8f6f9cc) built for Vulkan at ~/llama-drex (chain3).
+- AWS Strands Decider 2B (StrandsAgents/strands-decider-2B-hobson-v21): LoRA + head on Qwen3.5-2B, served only by the torch `strands-decider` package; no llama.cpp arch or GGUF, so not runnable on the Vulkan backend. Not measured.
+- PolicyLM-1.7B (musubilabs/policylm-1.7b): BidirLM torch-only guardrail classifier, not a System One decision model; no GGUF/Vulkan path. Not measured.

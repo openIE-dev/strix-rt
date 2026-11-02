@@ -280,3 +280,5 @@ Perf level pinned high, medians (logs/k6/bench.log, logs/k6/refbench.log):
 | audio decode | 0.25 | not measured separately |
 | total per clip (excl. load) | ~476 | ~1089 (+ audio) |
 DiT 2.35x faster; whole clip ~2.3x. The reference VAE is ~1.1x faster than ours once warm.
+
+- 2026-11-02: idle-baseline loop TIMEOUT, 1/6 clean windows (load ~20 from builds); pending a night rerun.

@@ -1,0 +1,27 @@
+#version 450
+// Routed-expert down projection, summed over the selected experts with routing weights: y[r] = sum_e rw_e * ws2_e * dot(Wd_e[r,:], h_e). N=5120, K=2560.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer SW { uvec4 sw[]; };
+layout(std430, binding = 1) readonly buffer SS { uint ss[]; };
+layout(std430, binding = 2) readonly buffer X { float x[]; };   // h: [topk][K]
+layout(std430, binding = 3) writeonly buffer Y { float y[]; };
+layout(std430, binding = 4) readonly buffer M { float meta[]; };
+layout(push_constant) uniform PC { uint n; uint k; uint slot_bytes; uint wproj_bytes; uint s_base; uint sproj_bytes; uint topk; } pc;
+#include "fp4common.glsl"
+void main() {
+    init_luts();
+    uint r = gl_WorkGroupID.x * 8u + gl_SubgroupID, ln = gl_SubgroupInvocationID;
+    if (r >= pc.n) return;
+    uint k32 = pc.k >> 5, srow = pc.k >> 4; float tot = 0.0;
+    for (uint e = 0u; e < pc.topk; e++) {
+        uint sb = floatBitsToUint(meta[e * 8u + 4u]) * pc.slot_bytes; uint dv = sb >> 4, ds = sb + pc.s_base; float a = 0.0;
+        for (uint j = ln; j < k32; j += 32u) {
+            uint so = ds + r * srow + 2u * j; uint s16 = (ss[so >> 2] >> ((so & 2u) * 8u)) & 0xffffu;
+            a += dot32(sw[dv + r * k32 + j], s16, e * pc.k + j * 32u);
+        }
+        tot += subgroupAdd(a) * meta[e * 8u + 2u] * meta[e * 8u + 3u];
+    }
+    if (subgroupElect()) y[r] = tot;
+}

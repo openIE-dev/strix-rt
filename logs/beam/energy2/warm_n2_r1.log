@@ -1,0 +1,29 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input", "cros_ec hwmon fan RPM + EC temps (no fan power sensor)", "k10temp Tctl"]
+missing: ["msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)"]
+[load] layer 0 0.2s
+[load] layer 10 0.8s
+[load] layer 20 1.3s
+[load] layer 30 2.2s
+[load] layer 40 2.7s
+[load] layer 50 3.3s
+[load] router+expert index 3.6s
+[load] done 4.3s
+pos 10 top5 151672:21.7615:-0.1229 151671:19.5410:-2.3434 91:17.1571:-4.7273 311:16.0949:-5.7895 151670:15.2571:-6.6273
+pos 11 top5 59604:24.0457:-0.3722 34484:22.1346:-2.2833 12095:21.4971:-2.9207 26865:21.0170:-3.4008 82260:20.4246:-3.9932
+generated [151672, 59604]
+per-step wall s: 1.18 0.87 0.57 0.64 0.70 0.54 0.63 0.45 0.51 0.54 0.57 0.54
+total 7.73s  gpu 1.51s  disk(stream) 6.08s (104.04 GB, 17.12 GB/s)  steps 12
+duration 12.200 s, 245 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package       650.563      53.32        6.60      570.020  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores         262.610      21.53        0.27      259.339  gpu_metrics average_all_core_power [power-integrated]
+cpu_cores_smu      262.610      21.53        0.27      259.339  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone       17.744       1.45        0.01       17.590  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx               116.965       9.59        0.00      116.956  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other         211.185      17.31        6.20      135.585  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket            590.761      48.42        6.47      511.880  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon         585.004      47.95        5.96      512.307  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

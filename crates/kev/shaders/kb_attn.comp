@@ -17,7 +17,7 @@ layout(std430, binding = 2) readonly buffer VC { uvec4 vc[]; };
 layout(std430, binding = 3) writeonly buffer A { float16_t a[]; };
 layout(std430, binding = 4) readonly buffer KBR { uvec4 kb_[]; };
 layout(std430, binding = 5) readonly buffer VBR { uvec4 vb_[]; };
-layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; uint q_stride; uint pos0; float scale; uint ldp; uint lda; uint M; uint row0; uint bcache_off; } pc;
+layout(push_constant) uniform PC { uint n_head; uint n_kv; uint cache_off; uint q_stride; uint pos0; float scale; uint ldp; uint lda; uint M; uint row0; uint bcache_off; uint bidir; } pc;
 const uint D = 256u, TB = 16u, KB = 32u;
 shared uvec4 Ks[KB][32]; shared uvec4 Vs[KB][32];
 vec2 u2(uint x) { return unpackHalf2x16(x); }
@@ -34,7 +34,7 @@ void main() {
     [[unroll]] for (uint d = 0u; d < 16u; d++) q[d] = qkv[qb + d] * pc.scale;
     float acc[16]; [[unroll]] for (uint d = 0u; d < 16u; d++) acc[d] = 0.0;
     float m = -1e30, l = 0.0;
-    uint last = pc.pos0 + min(tb * TB + TB, pc.M) - 1u;
+    uint last = pc.pos0 + (pc.bidir != 0u ? pc.M : min(tb * TB + TB, pc.M)) - 1u;
     uint kvbase4 = (pc.cache_off + kvh * D) / 8u, rowstride4 = pc.n_kv * D / 8u;
     for (uint k0 = 0u; k0 <= last; k0 += KB) {
         barrier();
@@ -53,7 +53,7 @@ void main() {
             float s = q[0]*k01.x + q[1]*k01.y + q[2]*k23.x + q[3]*k23.y + q[4]*k45.x + q[5]*k45.y + q[6]*k67.x + q[7]*k67.y
                     + q[8]*k89.x + q[9]*k89.y + q[10]*kab.x + q[11]*kab.y + q[12]*kcd.x + q[13]*kcd.y + q[14]*kef.x + q[15]*kef.y;
             s += subgroupShuffleXor(s, 8u); s += subgroupShuffleXor(s, 4u); s += subgroupShuffleXor(s, 2u); s += subgroupShuffleXor(s, 1u);
-            if (k0 + j <= mypos) {
+            if (pc.bidir != 0u || k0 + j <= mypos) {
                 float mn = max(m, s), cr = exp(m - mn), pe = exp(s - mn);
                 l = l * cr + pe; m = mn;
                 uvec4 va = Vs[j][2u * p], vb = Vs[j][2u * p + 1u];

@@ -85,7 +85,7 @@ $MODELS/new/{gemma4/e4b, gemma4/26b-a4b, nemotron3, cosmos3/Cosmos3-Nano}
 - Results, 6 test images (logs/n35/imgparity1.log, imgparity2.log, imgvl1.log):
 | image | resized to | tokens | pixel tensor vs mtmd | ViT embedding cosine (min per-token) | greedy answer vs mtmd-cli |
 |---|---|---|---|---|---|
-| dusk256.png (detmedia frame) | 512x512 | 256 | bit-exact (0 of 786432 differ) | 0.99998 (0.99969) | identical to EOS (44/45 ids + final ".\n\n" vs "." EOS) |
+| dusk256.png (test frame) | 512x512 | 256 | bit-exact (0 of 786432 differ) | 0.99998 (0.99969) | identical to EOS (44/45 ids + final ".\n\n" vs "." EOS) |
 | qi1024.png | 1024x1024 | 1024 | bit-exact | 0.99997 (0.9983) | identical to EOS (43/44, same ending) |
 | qi_1500x1001.png | 1504x992 | 1457 | bit-exact | 0.99997 (0.9930) | identical to EOS (39/40, same ending) |
 | tiny_100x75.png (upscaled) | 608x448 | 266 | bit-exact | 0.99995 (0.9976) | identical to EOS (54/55, same ending) |
@@ -107,3 +107,16 @@ $MODELS/new/{gemma4/e4b, gemma4/26b-a4b, nemotron3, cosmos3/Cosmos3-Nano}
 - Verification beyond the two project JPEGs: a C harness (`logs/n35/jpgtest/stbdump.c`, compiled against the same stb_image.h with SSE2 and again with STBI_NO_SIMD) dumps stb output for a 34-file corpus: Go image/testdata (baseline, progressive, 4:4:4 / 4:2:2 / 4:2:0 / 4:4:0 / 4:1:0 / 4:1:1 and odd factors 221122, 222112, 211211, 121121, 221212, restart intervals, separate DC progression, truncated progressive, RGB-component-id, CMYK, grayscale incl. 2x2 sampling) + two sysstat/bcc docs JPEGs + city_1000x562.jpg + big_3000x2000.jpg. stb SSE2 output == stb scalar output on all 34, and `stbjpg_cmp` reports 34/34 byte-exact (`logs/n35/jpgtest/cmp.log`).
 - Results after the port (logs/n35/imgparity3.log, imgvl2.log): pixel tensors bit-exact on all 6 test images (incl. city_1000x562.jpg 0/1714176 differ, big_3000x2000.jpg 0/10106880), ViT embedding cosine 0.99995-0.99998 (city 0.99996, min per-token 0.9965, was 0.9631), greedy answers identical to EOS on all 6 (city 55/56 ids + the same final '.'+EOS vs '.\n\n' merge as every other image; before: diverged at token 45).
 - Limits: only 8-bit JPEG (as stb); arithmetic-coded or 12-bit files fail like in stb; 16-bit/palette PNG paths of the image crate are not stb-verified (not needed for the tests). CPU decode+preprocess of the 3000x2000 JPEG is ~74 ms (decode inside the one-time file read; per-image encode energy numbers above exclude file decode).
+
+## Beam-1.0-501B-A23B (Reflection) - added 2026-10-18 (disk-streamed)
+501B/23.4B-active MoE (3 dense + 49 MoE layers, 256 experts, top-8, gated GQA + SWA, NoPE full layers, scaled residual). NVFP4 checkpoint streamed from NVMe: see docs/beam.md.
+Status: runs, correct output; ~0.45-1.2 s/token, ~21 J/token warm. Open: prefill batching, prefetch, numeric parity reference, cold-cache energy.
+
+- Beam-501B phase 3 (disk-streaming, Strix Halo): 3-bit experts 0.89 tok/s (95.7% top-1 vs NVFP4), 2-bit 1.19 tok/s (74%, too lossy); per-layer GPU-visible LRU expert cache with 69-81 GB RAM: NVFP4 2.31 tok/s (hit 77%), 3-bit 2.69, 2-bit 4.78 tok/s, vs 0.72 uncached cold. See docs/beam.md.
+
+- Beam-501B cached energy (net socket, differential, warm-up excluded): NVFP4 uncached 45.8 J/token; +cache 30.8; 3-bit+cache 13.9 (0.25 s/tok); 2-bit+cache 10.0 (0.147 s/tok, quality-limited). Mixed 3/2-bit with 64 hot experts/layer: top-1 91.8% (KL .063) vs 2-bit 81.9% (KL .43), 3-bit 94.3%. See docs/beam.md Phase 4.
+
+- Beam 2-bit with activation-aware scales (calibrated on 6 prompts, tested on 6 other prompts): top-1 85.1% vs 81.9% data-free, KL .237 vs .433 (3-bit: 94.3%, .031). See docs/beam.md.
+
+## Beam-1.0-501B-A23B: quantization follow-up (Nov 2)
+Cactus-style codebook 3-bit cuts the act-weighted expert error by 4% on average vs our act-aware q3 (0.0273 vs 0.0285; up to 12% at layers 20-50). Not adopted yet; it needs a perplexity check first. ABM GEMV: exact but no faster, so MAC is kept. Edge0 expert-cache policies: LFU 0.702 vs LRU 0.690 hit rate, vs a Belady optimum of 0.837, so it wasn't ported.

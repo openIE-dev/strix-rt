@@ -1,0 +1,31 @@
+#version 450
+// Routed-expert gate+up (fused SwiGLU) for NVFP4 weights in streamed slots. Grid: x = row/8, y = expert slot (8). N=2560, K=5120.
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_basic : require
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) readonly buffer SW { uvec4 sw[]; };
+layout(std430, binding = 1) readonly buffer SS { uint ss[]; };
+layout(std430, binding = 2) readonly buffer X { float x[]; };
+layout(std430, binding = 3) writeonly buffer H { float h[]; };
+layout(std430, binding = 4) readonly buffer M { float meta[]; };
+layout(push_constant) uniform PC { uint n; uint k; uint slot_bytes; uint wproj_bytes; uint s_base; uint sproj_bytes; uint topk; } pc;
+#include "fp4common.glsl"
+void main() {
+    init_luts();
+    uint r = gl_WorkGroupID.x * 8u + gl_SubgroupID, e = gl_WorkGroupID.y, ln = gl_SubgroupInvocationID;
+    if (r >= pc.n) return;
+    uint k32 = pc.k >> 5, rowv = pc.k >> 5; // uvec4 per row = K/32
+    uint sb = floatBitsToUint(meta[e * 8u + 4u]) * pc.slot_bytes;
+    uint gv = (sb + pc.wproj_bytes) >> 4, uv = (sb + 2u * pc.wproj_bytes) >> 4;      // gate, up weight (uvec4 index)
+    uint gs = (sb + pc.s_base + pc.sproj_bytes), us = (sb + pc.s_base + 2u * pc.sproj_bytes); // gate, up scale (byte offsets)
+    uint srow = pc.k >> 4; // scale bytes per row
+    float ag = 0.0, au = 0.0;
+    for (uint j = ln; j < k32; j += 32u) {
+        uint go = gs + r * srow + 2u * j, uo = us + r * srow + 2u * j;
+        uint sg = (ss[go >> 2] >> ((go & 2u) * 8u)) & 0xffffu, su = (ss[uo >> 2] >> ((uo & 2u) * 8u)) & 0xffffu;
+        ag += dot32(sw[gv + r * rowv + j], sg, j * 32u);
+        au += dot32(sw[uv + r * rowv + j], su, j * 32u);
+    }
+    ag = subgroupAdd(ag); au = subgroupAdd(au);
+    if (subgroupElect()) { float g = ag * meta[e * 8u + 0u], u = au * meta[e * 8u + 1u]; h[e * pc.n + r] = g / (1.0 + exp(-g)) * u; }
+}
