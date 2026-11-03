@@ -138,7 +138,7 @@ Script: `tools/baselabs/bl_analyze.py`. Socket differential, quiet gate + gpu_lo
 Hidden-state probe vs confidence (AUROC predicting tier-1 wrong; confidence / probe dev / probe oof): kev08 0.801/0.563/0.742, kev4b 0.817/0.785/0.739, kev9q8 0.810/0.635/0.758. Confidence routing is as good as the probe.
 Idle power (server loaded vs none): NOT measured. All 9 windows so far were contaminated by other CPU jobs (8.7-79 W).
 
-## Round: open-weight rival decision models (Nov 2, 2026; in progress)
+## Round: open-weight rival decision models (Nov 2-3, 2026; done)
 
 Same harness as Round 7 (tools/cascade, 1000 items = 250 each of ag_news/sst5/mnli/boolq; test = 800, dev = first 50/ds for the temperature refit). Rivals are served by upstream llama-server `/v1/systemone` on Vulkan (~/llama-latest e36df6047), not kev_serve.
 
@@ -152,7 +152,39 @@ Accuracy (all 1000 items; analyze.py test-split numbers in parentheses):
 | Kev-0.8B (ref) | | 0.749 (0.743) | 0.904 | 0.512 | 0.780 | 0.800 | 0.039 |
 | Kev-9B Q8 (ref) | | 0.822 (0.828) | 0.920 | 0.588 | 0.876 | 0.904 | 0.038 |
 
-Energy (e1 batch 1, 3 reps; b8 floor protocol, 8 noul q/state K=8 vs K=1, 2 reps) is queued behind gpu_lock (idle-power loop, then codebook job): tools/cascade/rivals_chain.sh, rivals_chain2.sh, rivals_chain3.sh. Results land in logs/cascade/energy and logs/cascade/b8.
+Energy finished Nov 3 07:54 UTC (rivals_chain3 done). Method: e1 = batch 1, 3 reps, differential socket J (hi pass minus lo pass), windows with > 1.5 foreign busy cores dropped; b8 = 8 questions per request (K=8) vs 1 (K=1), 2 reps, 320-decision difference. Full tables: logs/cascade/analysis.md; ML.ENERGY export: logs/mlenergy/.
+
+Test split (800 items), tools/cascade/analyze.py, gross socket J/decision (mean over the 4 datasets; net = idle baseline removed):
+
+| model | acc (test) | ag_news | sst5 | mnli | boolq | ECE refit | J/dec gross | J/dec net | gfx J (ag_news) | clean reps |
+|---|---|---|---|---|---|---|---|---|---|---|
+| vLLM-SR d3-edge BF16 | 0.688 | 0.840 | 0.405 | 0.815 | 0.690 | 0.042 | 3.14 | 2.72 | 1.31 | 3 |
+| vLLM-SR d3-lite BF16 | 0.738 | 0.845 | 0.450 | 0.850 | 0.805 | 0.028 | 6.29 | 5.45 | 2.73 | 3 |
+| vLLM-SR d3-flash Q8_0 | 0.819 | 0.880 | 0.565 | 0.895 | 0.935 | 0.024 | 19.82 | 18.05 | 7.38 | 2 (2 dropped) |
+| pplx-decider-flash v1.2 Q8_0 (reconverted) | 0.802 | 0.850 | 0.555 | 0.900 | 0.905 | 0.039 | 10.64 | 9.64 | 4.07 | 2 (1 dropped) |
+| pplx-decider v1.2 27B Q8_0 (converted) | 0.821 | 0.870 | 0.575 | 0.910 | 0.930 | 0.023 | 62.60 | 57.56 | 25.16 | 2 (1 dropped) |
+| Drex Max v1 Q8_0 (nace-ai fork) | 0.839 | 0.935 | 0.595 | 0.895 | 0.930 | 0.027 | 64.72 | 59.18 | 25.61 | 2 (2 dropped) |
+| Laya F16 (ref) | 0.750 | 0.915 | 0.495 | 0.840 | 0.750 | 0.037 | 1.92 | 1.65 | 0.82 | 2 |
+| Kev-0.8B (ref) | 0.743 | 0.895 | 0.505 | 0.785 | 0.785 | 0.039 | 4.90 | 3.61 | 2.13 | 3 |
+| Kev-4B (ref) | 0.804 | 0.910 | 0.560 | 0.845 | 0.900 | 0.020 | 18.90 | 14.76 | 6.34 | 3 |
+| Kev-9B Q8_0 (ref) | 0.828 | 0.915 | 0.605 | 0.880 | 0.910 | 0.038 | 24.51 | 20.40 | 8.28 | 1 |
+| Kev-27B Q8_0 (ref) | 0.833 | 0.890 | 0.635 | 0.895 | 0.910 | 0.029 | 80.43 | 66.39 | 23.80 | 1 |
+| Qwen3.8-27B Q4_K_M zero-shot (t2) | 0.782 | 0.845 | 0.565 | 0.830 | 0.890 | 0.114 (raw) | 65.29 | 59.86 | 29.58 | 3 |
+
+Batch-8 floor protocol (logs/cascade/b8, /tmp/b8an.py; J/decision = (J(K=8 run) - J(K=1 run)) / 320, socket gross / net / gfx, median of clean reps):
+
+| model | K | J/dec gross [range] | net | gfx | clean reps (dropped) |
+|---|---|---|---|---|---|
+| d3-edge | 1 / 8 | 2.76 [2.74-2.78] / 2.74 [2.72-2.76] | 2.37 / 2.36 | 1.19 / 1.18 | 2 (0) |
+| d3-lite | 1 / 8 | 5.63 [5.59-5.67] / 5.75 [5.50-6.00] | 4.87 / 5.02 | 2.41 / 2.37 | 2 (0) |
+| d3-flash | 1 / 8 | 16.48 [16.13-16.83] / 16.07 [16.05-16.09] | 14.94 / 14.61 | 6.18 / 6.09 | 2 (0) |
+| pplx-flash | 1 / 8 | 9.04 [8.61-9.48] / 8.60 [8.58-8.62] | 8.15 / 7.76 | 3.31 / 3.27 | 2 (0) |
+| pplx-27B | 1 / 8 | 51.68 / 51.71 | 47.77 / 47.55 | 20.74 / 20.63 | 1 (1) |
+| Drex Max | 1 / 8 | 52.86 [52.68-53.04] / 52.87 [52.51-53.23] | 49.58 / 48.46 | 21.49 / 21.17 | 2 (0) |
+| Kev-0.8B (kev_serve) | 1 / 8 | 4.35 [4.12-4.57] / 0.67 [0.64-0.69] | 3.02 / 0.47 | 2.00 / 0.30 | 2 (0) |
+| Kev-9B Q8_0 (kev_serve) | 1 / 8 | 22.26 [21.87-22.64] / 3.72 | 17.75 / 3.02 | 7.61 / 1.23 | 2 (0) / 1 (1) |
+
+Reading: on upstream llama-server /v1/systemone, packing 8 questions per request does not lower J/decision for any rival (K=8 within 0-5% of K=1), while kev_serve batching cuts Kev-0.8B 6.5x (4.35 -> 0.67 J) and Kev-9B 6.0x (22.26 -> 3.72 J). Best accuracy is Drex Max (0.839) at 64.7 J/dec; Kev-9B Q8_0 reaches 0.828 at 24.5 J (batch 1) or 3.7 J (K=8). Kev-0.8B at K=8 (0.67 J) is 4.1x below the cheapest rival (d3-edge 2.74 J) with +5.5 pts accuracy.
 
 Notes:
 - pplx-decider-flash v1.2: the published GGUF (perplexity-ai/pplx-decider-flash-gguf-v1.2) has only `pplx_decider.*` keys and no `qwen35.decision.type`, so llama-server returns 501 on /v1/systemone. Re-converted from perplexity-ai/pplx-decider-flash-v1.2 safetensors with llama.cpp master (3f8af15a7) convert_hf_to_gguf --outtype q8_0 -> pplx-flash-v1.2-conv-Q8_0.gguf (chain2).

@@ -16,3 +16,5 @@
 - 23:35 RESULTS: joey-1 J/dec median 9.33 gross / 7.82 net (n=3, 154 ms/dec); elephant-1 42.26 / 36.20 (n=3, 672 ms; r1 outlier 61.1 at 102 W, likely contaminated). Parity in all energy runs 100/100 & 16/16.
   probe kev9q8: AUROC conf 0.810, probe dev 0.635, oof 0.758 -> confidence routing >= probe; Kev-9B alone (0.828) beats t2 (0.782).
   /v1/decisions curl OK (3 question types, empty questions -> 4xx error). k8 0.66 J/dec vs k1 4.18 (16 vs 115 ms/dec).
+- Nov2 10:10Z: 27B rows+docs committed 195c2c8; idle r1-3 contaminated (moved to floor/contaminated_1030), requeued idle.sh (box load 25 from wai builds)
+- Nov3 11:45Z: rivals chain3 done 07:54Z; analysis + b8 + ML.ENERGY rerun, rival tables in docs/decision_models.md. cbq (per-layer codebook) requant FAIL 09:04Z after layer 21 of 3-21 logged (act-err q3 2.45-2.74 vs cb 0.018-0.026); no exactness check ran, BEAM_CBLUT shader edits left uncommitted. Idle loop rerun started (1/6 clean so far).

@@ -1,0 +1,17 @@
+sources: ["rapl:package (intel-rapl:0/energy_uj)", "rapl:core-zone (intel-rapl:0:0, single core MSR)", "msr:per-core energy 0xC001029A (/dev/cpu/*/msr, needs CAP_SYS_RAWIO)", "amdgpu gpu_metrics v3.0", "amdgpu hwmon power1_input (PPT)", "nvme hwmon temp1_input"]
+missing: []
+DONE 200 decisions in 88.83 s
+duration 88.901 s, 1779 samples (20 Hz effective)
+fabric             joules      avg W      idle W        net J  source
+cpu_package     12270.470     138.02       11.42    11255.295  powercap intel-rapl:0 (RAPL package MSR 0xC001029B) [counter]
+cpu_cores         120.318       1.35        0.42       82.838  MSR 0xC001029A summed over physical cores [counter]
+cpu_cores_smu      116.746       1.31        0.41       80.315  gpu_metrics average_all_core_power [power-integrated]
+cpu_core_zone        3.196       0.04        0.03        0.947  powercap intel-rapl:0:0 (one core's energy MSR) [counter]
+gfx              4807.730      54.08        0.00     4807.470  gpu_metrics average_gfx_power [power-integrated]
+npu                 0.000       0.00        0.00        0.000  gpu_metrics average_ipu_power [power-integrated]
+soc_other        7274.676      81.83       10.76     6318.230  socket - gfx - all_core - ipu (memory/DF/IO/VCN/display residual) [power-integrated]
+socket          12199.152     137.22       11.17    11206.016  gpu_metrics average_socket_power (SMU) [power-integrated]
+ppt_hwmon       12154.422     136.72       10.69    11204.353  amdgpu hwmon power1_input (PPT) [power-integrated]
+memory_df               -          -           -            -  gpu_metrics DRAM traffic + FCLK/UCLK (no power sensor) [activity]
+nvme                    -          -           -            -  nvme hwmon temp (no power sensor; see docs for PS table) [activity]
+other                   -          -           -            -  activity/clocks/temps from gpu_metrics [activity]

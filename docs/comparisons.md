@@ -538,3 +538,6 @@ Median gross socket J/decision over ag/sst5/mnli/boolq: Laya 1.92, Kev-0.8B 4.90
 - 1B-class decision models: the iGPU (Vulkan) runs at 2.6-2.7 J/decision vs 4.2-8.1 J on the NPU (FLM); about the same J/generated token (0.26-0.35).
 - Speculative decoding net J/token: Glimmer 30B 7.37->5.84 (DFlash), Qwen3.8 27B 7.36->4.84 (MTP3), gpt-oss 20B 0.94->1.15 (EAGLE3; worse).
 - Beam-501B ABM GEMV variants: no gain; MAC is 1.94 J/tok.
+
+## Open-weight rival decision models, J/decision (strix-rt harness, Nov 3; see docs/decision_models.md)
+800-item test of ag/sst5/mnli/boolq, gross socket J/decision batch 1 (accuracy): vLLM-SR d3-edge 3.14 (0.688), d3-lite 6.29 (0.738), d3-flash 19.82 (0.819), pplx-decider-flash v1.2 10.64 (0.802), pplx-decider v1.2 27B 62.60 (0.821), Drex Max v1 64.72 (0.839); refs Laya 1.92 (0.750), Kev-0.8B 4.90 (0.743), Kev-9B Q8_0 24.51 (0.828). With 8 questions per request the rivals stay flat (d3-edge 2.74, pplx-flash 8.60, Drex Max 52.87) while kev_serve drops to 0.67 (Kev-0.8B) and 3.72 (Kev-9B). ML.ENERGY-format export: `logs/mlenergy/`.
