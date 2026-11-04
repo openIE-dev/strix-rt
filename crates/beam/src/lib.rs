@@ -156,7 +156,7 @@ impl Model {
                 exps[l] = (0..NEXP).map(|e| if mixed && hot[l][e] { ExpLoc { file: NL + l, w: (e * shi) as u64, s: (e * shi + 3 * wh) as u64, ws2: [1.0; 3] } } else { ExpLoc { file: l, w: (e * slo) as u64, s: (e * slo + 3 * wl) as u64, ws2: [1.0; 3] } }).collect(); }
             if mixed { let nh: usize = hot.iter().map(|v| v.iter().filter(|&&x| x).count()).sum(); eprintln!("[load] mixed precision: {nh} hot experts at {hb}-bit, rest {qbits}-bit"); }
             eprintln!("[load] quantized experts {qbits}-bit from {qd}: {slot} B/expert ({:.3} of NVFP4)", slot as f64 / SLOT as f64); }
-        let mut k = k; if qbits > 0 { k[K_GU] = ctx.kernel(spv!("bm_qgu"), 5, 28, &[qbits, mixed as u32, abm], Some(32))?; k[K_DN] = ctx.kernel(spv!("bm_qdn"), 5, 28, &[qbits, mixed as u32, abm], Some(32))?; }
+        let mut k = k; if qbits > 0 { k[K_GU] = ctx.kernel(spv!("bm_qgu"), 5, 60, &[qbits, mixed as u32, abm, cblut().is_some() as u32], Some(32))?; k[K_DN] = ctx.kernel(spv!("bm_qdn"), 5, 60, &[qbits, mixed as u32, abm, cblut().is_some() as u32], Some(32))?; }
         let (dfiles, file_len) = if qbits > 0 { use std::os::unix::fs::OpenOptionsExt; let qd = std::env::var("BEAM_QDIR").unwrap().replace('~', &std::env::var("HOME").unwrap_or_default());
             let mut paths: Vec<String> = (0..NL).map(|l| if l < N_DENSE || l >= nl { "/dev/null".into() } else { format!("{qd}/L{l:02}.bin") }).collect();
             if let Some(h) = &qhi { paths.extend((0..NL).map(|l| if l < N_DENSE || l >= nl { "/dev/null".to_string() } else { format!("{h}/L{l:02}.bin") })); }
@@ -223,7 +223,8 @@ impl Model {
     fn f32b_router(&self) -> &Buffer { &self.rtr }
     fn rec_exp(&self, cb: vk::CommandBuffer, l: usize, cached: bool) -> Result<()> {
         let c = &self.ctx; let sb = if cached && self.ck > 0 { &self.cache[l] } else { &self.slots };
-        let pc = push_u32(&[0, 0, self.slot as u32, self.wp as u32, (3 * self.wp) as u32, self.sp as u32, TOPK as u32]);
+        let mut pc = push_u32(&[0, 0, self.slot as u32, self.wp as u32, (3 * self.wp) as u32, self.sp as u32, TOPK as u32]);
+        let lut: [f32; 8] = cblut().map(|t| t[l]).unwrap_or([-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5]); for v in lut { pc.extend_from_slice(&v.to_le_bytes()); }
         let mut p = pc.clone(); p[0..4].copy_from_slice(&(FF_EXP as u32).to_le_bytes()); p[4..8].copy_from_slice(&(DIM as u32).to_le_bytes());
         let ds = self.ds(K_GU, &[sb, sb, &self.xn, &self.h, &self.meta])?;
         c.dispatch3(cb, &self.k[K_GU], ds, &p, (FF_EXP / 8) as u32, TOPK as u32, 1); self.bar(cb);
@@ -383,4 +384,12 @@ fn pf_predict(sh: &PfShared, job: PfJob, depth: usize) {
         sh.issued.fetch_add(top.len() as u64, std::sync::atomic::Ordering::Relaxed);
         sh.pred.lock().unwrap().insert((j, d), top);
     }
+}
+
+/// Per-layer 3-bit codebook (BEAM_CBLUT file: lines "layer v0 .. v7"); layers not listed use uniform q - 3.5.
+fn cblut() -> Option<&'static Vec<[f32; 8]>> {
+    static T: std::sync::OnceLock<Option<Vec<[f32; 8]>>> = std::sync::OnceLock::new();
+    T.get_or_init(|| { let f = std::env::var("BEAM_CBLUT").ok()?; let mut t = vec![[-3.5f32, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5]; NL];
+        for line in std::fs::read_to_string(f).ok()?.lines() { let v: Vec<f32> = line.split_whitespace().filter_map(|x| x.parse().ok()).collect(); if v.len() == 9 { let l = v[0] as usize; for i in 0..8 { t[l][i] = v[1 + i]; } } }
+        eprintln!("[load] codebook LUT from BEAM_CBLUT"); Some(t) }).as_ref()
 }

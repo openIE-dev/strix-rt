@@ -1,4 +1,5 @@
 // B-bit symmetric group-32 quant: group g of a row = BITS uint32 words (code i at bit BITS*i, LE bitstream), scale fp16 per group. value = (q - C) * s, C = (2^BITS-1)/2.
+// CB (spec constant 3, BEAM_CBLUT=file): per-layer 8-entry codebook in push constants, value = lut[q] * s (MAC path only).
 // ABM (spec constant 2, BEAM_ABM): 0 = multiply-accumulate per weight (default);
 //   1 = add-before-multiply, bit-plane form (T-MAC style): sum q*x = sum_k 2^k * (sum of x where bit k of q is set); value = that - C*sum(x); BITS adds-only passes + BITS+1 multiplies per group;
 //   2 = add-before-multiply, code-bin form (LUT-GEMM / arXiv 2610.31913 style): bin[q] += x, then sum_b (b - C) * bin[b] (2^BITS multiplies per group).
@@ -21,7 +22,8 @@ float qdot32(uint wbase, uint sc16, uint xo, uint BITS) {
         for (uint i = 0u; i < 32u; i++) b[code_at(wbase, i, BITS)] += x[xo + i];
         for (uint k = 0u; k <= MASK; k++) acc += (float(k) - CEN) * b[k];
     } else {
-        for (uint i = 0u; i < 32u; i++) acc += (float(code_at(wbase, i, BITS)) - CEN) * x[xo + i];
+        if (CB != 0u) { float L[8]; for (uint k = 0u; k < 8u; k++) L[k] = pc.lut[k]; for (uint i = 0u; i < 32u; i++) acc += L[code_at(wbase, i, BITS) & 7u] * x[xo + i]; }
+        else { for (uint i = 0u; i < 32u; i++) acc += (float(code_at(wbase, i, BITS)) - CEN) * x[xo + i]; }
     }
     return acc * unpackHalf2x16(sc16).x;
 }

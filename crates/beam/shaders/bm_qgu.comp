@@ -6,12 +6,13 @@ layout(local_size_x = 256) in;
 layout(constant_id = 0) const uint BITS0 = 2;
 layout(constant_id = 1) const uint MIXED = 0;
 layout(constant_id = 2) const uint ABM = 0;
+layout(constant_id = 3) const uint CB = 0;
 layout(std430, binding = 0) readonly buffer SW { uint cw[]; };
 layout(std430, binding = 1) readonly buffer SS { uint ss[]; };
 layout(std430, binding = 2) readonly buffer X { float x[]; };
 layout(std430, binding = 3) writeonly buffer H { float h[]; };
 layout(std430, binding = 4) readonly buffer M { float meta[]; };
-layout(push_constant) uniform PC { uint n; uint k; uint slot_bytes; uint wproj_bytes; uint s_base; uint sproj_bytes; uint topk; } pc;
+layout(push_constant) uniform PC { uint n; uint k; uint slot_bytes; uint wproj_bytes; uint s_base; uint sproj_bytes; uint topk; float lut[8]; } pc;
 #include "qcommon.glsl"
 void main() {
     uint r = gl_WorkGroupID.x * 8u + gl_SubgroupID, e = gl_WorkGroupID.y, ln = gl_SubgroupInvocationID;
