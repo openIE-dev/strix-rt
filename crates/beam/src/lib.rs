@@ -135,7 +135,7 @@ impl Model {
             // same file order as Store::open (first appearance in beam.idx)
             Some(names.iter().map(|n| std::fs::OpenOptions::new().read(true).custom_flags(0x4000).open(format!("{dir}/{n}")).unwrap()).collect::<Vec<_>>()) } else { None };
         let file_len: Vec<u64> = st.files.iter().map(|f| f.metadata().map(|m| m.len()).unwrap_or(0)).collect();
-        let qbits: u32 = std::env::var("BEAM_QDIR").ok().and_then(|d| d.rsplit('q').next().and_then(|b| b.trim_matches('/').parse().ok())).unwrap_or(0);
+        let qbits: u32 = qdir().and_then(|d| d.rsplit('q').next().and_then(|b| b.trim_matches('/').parse().ok())).unwrap_or(0);
         let qhi: Option<String> = std::env::var("BEAM_QHI").ok().map(|d| d.replace('~', &std::env::var("HOME").unwrap_or_default()));
         let hb: u32 = qhi.as_ref().and_then(|d| d.trim_end_matches('/').rsplit('q').next().and_then(|b| b.parse().ok())).unwrap_or(qbits); let mixed = qhi.is_some() && qbits > 0;
         let sbits = if mixed { qbits.max(hb) } else { qbits };
@@ -145,7 +145,7 @@ impl Model {
         let cache: Vec<Buffer> = if ck == 0 { vec![] } else { (0..NL).map(|l| ctx.buffer(if l >= N_DENSE && l < nl { (ck * slot) as u64 } else { 16 })).collect::<Result<Vec<_>>>()? };
         if ck > 0 { eprintln!("[load] expert cache {ck} slots/layer = {:.1} GB", (ck * slot * (nl - N_DENSE)) as f64 / 1e9); }
         let mut qfiles: Vec<File> = vec![]; let mut exps = exps; let mut ebits: Vec<Vec<u8>> = vec![vec![qbits as u8; NEXP]; NL];
-        if qbits > 0 { let qd = std::env::var("BEAM_QDIR").unwrap(); let qd = qd.replace('~', &std::env::var("HOME").unwrap_or_default());
+        if qbits > 0 { let qd = qdir().unwrap(); let qd = qd.replace('~', &std::env::var("HOME").unwrap_or_default());
             for l in 0..NL { if l < N_DENSE || l >= nl { qfiles.push(File::open("/dev/null")?); continue }
                 qfiles.push(File::open(format!("{qd}/L{l:02}.bin"))?); }
             if let Some(h) = &qhi { for l in 0..NL { if l < N_DENSE || l >= nl { qfiles.push(File::open("/dev/null")?) } else { qfiles.push(File::open(format!("{h}/L{l:02}.bin"))?) } } }
@@ -157,7 +157,7 @@ impl Model {
             if mixed { let nh: usize = hot.iter().map(|v| v.iter().filter(|&&x| x).count()).sum(); eprintln!("[load] mixed precision: {nh} hot experts at {hb}-bit, rest {qbits}-bit"); }
             eprintln!("[load] quantized experts {qbits}-bit from {qd}: {slot} B/expert ({:.3} of NVFP4)", slot as f64 / SLOT as f64); }
         let mut k = k; if qbits > 0 { k[K_GU] = ctx.kernel(spv!("bm_qgu"), 5, 60, &[qbits, mixed as u32, abm, cblut().is_some() as u32], Some(32))?; k[K_DN] = ctx.kernel(spv!("bm_qdn"), 5, 60, &[qbits, mixed as u32, abm, cblut().is_some() as u32], Some(32))?; }
-        let (dfiles, file_len) = if qbits > 0 { use std::os::unix::fs::OpenOptionsExt; let qd = std::env::var("BEAM_QDIR").unwrap().replace('~', &std::env::var("HOME").unwrap_or_default());
+        let (dfiles, file_len) = if qbits > 0 { use std::os::unix::fs::OpenOptionsExt; let qd = qdir().unwrap().replace('~', &std::env::var("HOME").unwrap_or_default());
             let mut paths: Vec<String> = (0..NL).map(|l| if l < N_DENSE || l >= nl { "/dev/null".into() } else { format!("{qd}/L{l:02}.bin") }).collect();
             if let Some(h) = &qhi { paths.extend((0..NL).map(|l| if l < N_DENSE || l >= nl { "/dev/null".to_string() } else { format!("{h}/L{l:02}.bin") })); }
             let fl = qfiles.iter().map(|f| f.metadata().map(|m| m.len()).unwrap_or(0)).collect();
@@ -386,10 +386,18 @@ fn pf_predict(sh: &PfShared, job: PfJob, depth: usize) {
     }
 }
 
+/// Quantized expert dir. BEAM_QDIR=cb (or =default) selects the default quant path: per-layer 3-bit codebook on all
+/// expert layers (cbBall, ~/models/new/beam/cbBall/q3; best measured: top1 0.950 KL 0.024 vs nvfp4). A `lut.txt` inside the
+/// dir is loaded as the codebook LUT unless BEAM_CBLUT overrides it. Unset = full-precision nvfp4 experts.
+fn qdir() -> Option<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::env::var("BEAM_QDIR").ok().map(|d| match d.as_str() { "cb" | "default" => format!("{home}/models/new/beam/cbBall/q3"), _ => d.replace('~', &home) })
+}
+
 /// Per-layer 3-bit codebook (BEAM_CBLUT file: lines "layer v0 .. v7"); layers not listed use uniform q - 3.5.
 fn cblut() -> Option<&'static Vec<[f32; 8]>> {
     static T: std::sync::OnceLock<Option<Vec<[f32; 8]>>> = std::sync::OnceLock::new();
-    T.get_or_init(|| { let f = std::env::var("BEAM_CBLUT").ok()?; let mut t = vec![[-3.5f32, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5]; NL];
+    T.get_or_init(|| { let f = std::env::var("BEAM_CBLUT").ok().or_else(|| qdir().map(|d| format!("{d}/lut.txt")).filter(|f| std::path::Path::new(f).exists()))?; let mut t = vec![[-3.5f32, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5]; NL];
         for line in std::fs::read_to_string(f).ok()?.lines() { let v: Vec<f32> = line.split_whitespace().filter_map(|x| x.parse().ok()).collect(); if v.len() == 9 { let l = v[0] as usize; for i in 0..8 { t[l][i] = v[1 + i]; } } }
         eprintln!("[load] codebook LUT from BEAM_CBLUT"); Some(t) }).as_ref()
 }
