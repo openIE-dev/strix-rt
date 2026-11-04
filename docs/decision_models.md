@@ -136,7 +136,7 @@ Script: `tools/baselabs/bl_analyze.py`. Socket differential, quiet gate + gpu_lo
 | kev-0.8b /v1/decisions, 8 questions/request | 0.66 | 0.52 | 16 | - |
 | kev-0.8b /v1/decisions, 1 question/request | 4.18 | 2.73 | 115 | - |
 Hidden-state probe vs confidence (AUROC predicting tier-1 wrong; confidence / probe dev / probe oof): kev08 0.801/0.563/0.742, kev4b 0.817/0.785/0.739, kev9q8 0.810/0.635/0.758. Confidence routing is as good as the probe.
-Idle power (server loaded vs none): NOT measured. All 9 windows so far were contaminated by other CPU jobs (8.7-79 W).
+Idle power (server loaded vs none, quiet box, 3 windows each, Nov 3 2026): socket median 7.88 W with no server (7.61/9.40/7.88) and 7.53 W with kev_serve loaded and idle (7.41/7.53/8.24). An idle kev_serve adds ~0 W, so gross and net J/decision differ only by the box floor. One contaminated Nov 2 window (22.7 W) is kept in logs/cascade/floor/contaminated_1102. Logs: logs/cascade/floor/idle_*.out, idle_clean.txt.
 
 ## Round: open-weight rival decision models (Nov 2-3, 2026; done)
 

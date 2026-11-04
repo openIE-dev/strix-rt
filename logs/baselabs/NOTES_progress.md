@@ -18,3 +18,6 @@
   /v1/decisions curl OK (3 question types, empty questions -> 4xx error). k8 0.66 J/dec vs k1 4.18 (16 vs 115 ms/dec).
 - Nov2 10:10Z: 27B rows+docs committed 195c2c8; idle r1-3 contaminated (moved to floor/contaminated_1030), requeued idle.sh (box load 25 from wai builds)
 - Nov3 11:45Z: rivals chain3 done 07:54Z; analysis + b8 + ML.ENERGY rerun, rival tables in docs/decision_models.md. cbq (per-layer codebook) requant FAIL 09:04Z after layer 21 of 3-21 logged (act-err q3 2.45-2.74 vs cb 0.018-0.026); no exactness check ran, BEAM_CBLUT shader edits left uncommitted. Idle loop rerun started (1/6 clean so far).
+- Nov3 16:40Z: public-staging 256637c pushed to openIE-dev/strix-rt main (ff). idle_loop rerun running.
+- Nov3 15:45Z: cbq rerun done 14:46Z (rc 0). Teacher-forced vs nvfp4, 282 tokens: q3 top1 0.943 KL 0.031; cbA (uniform codebook) top1 0.943 KL 0.022, dlogp -0.037; cbB (per-layer LUT) top1 0.000 KL 2.868, p(chosen) 0.005 (broken). Exactness check FAILED: uniform LUT path differs from cbA on sql, so BEAM_CBLUT shader edits stay uncommitted (LUT path bug to find).
+- Nov3 15:45Z: idle loop done. idle_none_c1 (Nov2, 22.7 W socket, contaminated) moved to floor/contaminated_1102 and redone 15:40Z (busy 0.09). Clean socket W: none 7.61/9.40/7.88 (median 7.88), srv 7.41/7.53/8.24 (median 7.53); idle kev_serve adds ~0 W over no server.
