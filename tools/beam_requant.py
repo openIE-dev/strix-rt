@@ -65,12 +65,14 @@ WP = 13107200 * bits // 8; SP = 13107200 // 32 * 2; REC = 3 * WP + 3 * SP
 print(f"bits {bits} record {REC} bytes ({REC/22118400:.3f} of NVFP4 22118400)", flush=True)
 for l in range(l0, l1 + 1):
     nexp = 4 if test else 256
-    fn = f"{out}/L{l:02d}.bin"; arr = np.memmap(fn, dtype=np.uint8, mode="w+", shape=(nexp * REC,)); errs = []
+    fn = f"{out}/L{l:02d}.bin"; tmp = f"{out}/.L{l:02d}.bin.tmp.{os.getpid()}"
+    if os.path.islink(fn) or os.path.islink(out): sys.exit(f"refusing: {fn} or its dir is a symlink (would write through it)")
+    arr = np.memmap(tmp, dtype=np.uint8, mode="w+", shape=(nexp * REC,)); errs = []
     for e in range(nexp):
         cod, sca = [], []
         for proj in ("down", "gate", "up"):
             c, s, r = quant(deq(l, e, proj), (ACT[l][1] if proj == "down" else ACT[l][0]) if ACT else None); cod.append(c.tobytes()); sca.append(s.tobytes()); errs.append(r)
         rec = b"".join(cod) + b"".join(sca); assert len(rec) == REC, (len(rec), REC)
         arr[e * REC:(e + 1) * REC] = np.frombuffer(rec, dtype=np.uint8)
-    arr.flush(); del arr
+    arr.flush(); del arr; os.replace(tmp, fn)  # atomic: never write in place / through links
     print(f"layer {l} done rel-MSE mean {np.mean(errs):.4f}", flush=True)
