@@ -9,7 +9,7 @@ fn envn(k: &str, d: usize) -> usize { std::env::var(k).ok().and_then(|v| v.parse
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().collect(); let mode = a.get(1).cloned().unwrap_or_default();
     let refd = arg(&a, "--ref", &format!("{}/k6_ref/out", std::env::var("HOME")?));
-    let mdir = arg(&a, "--model", &format!("{}/models/k6-pro-distill/transformer_al", std::env::var("HOME")?));
+    let mdir = arg(&a, "--model", &format!("{}/models/k6-pro-distill/transformer", std::env::var("HOME")?));
     if mode == "sched2" {   // CPU: every scheduler step on reference inputs/grids (out2 dumps) vs the next reference input
         let (raw, sig) = sched::schedule(10); println!("raw {raw:?}");
         for i in 0..9 { let (vin, vs) = rd(&refd, &format!("st{i}_in_vis"))?; let (ain, _) = rd(&refd, &format!("st{i}_in_aud"))?;
