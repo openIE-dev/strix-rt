@@ -24,10 +24,12 @@
 //! 256 bytes, or that do not start with the magic line, are unstructured. Unknown
 //! verbs are denied. There is no command list and no shell action.
 //!
-//! The parameters of an action are its scope. The allow binding is a domain-separated
-//! SHA-256 of the canonical bytes, so a later payload swap does not match `Permit::covers`.
-//! A `Permit` is the record of one `authorize` call. It is not a bearer token; nothing
-//! in this crate consumes a permit to perform I/O.
+//! The parameters of an action are its scope. An in-scope result carries a domain-separated
+//! SHA-256 of those canonical bytes, plus the energy commitment that was actually checked.
+//! Swapping the action or, when a ceiling applied, the joule figure or its provenance, does
+//! not satisfy `ScopeCheck::same_commitment`. The result is not a bearer token and not an
+//! instruction to execute. Nothing in this crate consumes it to perform I/O. A signed
+//! receipt (`sign`, `ledger`) is a different object and is not an in-scope result.
 //!
 //! Mesh joule ceilings are not stored on this baseline. When at least one matching
 //! grant carries `compute_ceiling_j`, the strictest of those ceilings is applied to
@@ -91,8 +93,8 @@ impl std::fmt::Display for DenyReason {
     }
 }
 
-/// Closed set of actions this baseline can name. Both are references to objects the
-/// runtime has already computed. Neither variant runs a tool.
+/// Closed set of scoped references this baseline can name. Both point at objects the
+/// runtime has already computed. Neither variant is a tool call or an execution request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Scope: the `/v1/decisions` content hash (`decision_hash` / slice content hash).
@@ -151,9 +153,14 @@ impl Action {
         }
     }
 
-    /// Domain-separated hash of [`Self::canonical`]. This is the scope binding.
-    pub fn binding(&self) -> Hash {
-        binding_of(&self.canonical())
+    /// Scope binding of the canonical document. `None` when this value is not one `parse_action` accepts.
+    pub fn scope_binding(&self) -> Option<Hash> {
+        let text = self.canonical();
+        let parsed = parse_action(text.as_bytes()).ok()?;
+        if parsed != *self || parsed.canonical() != text {
+            return None;
+        }
+        Some(binding_of(&text))
     }
 }
 
@@ -176,13 +183,12 @@ impl Grant {
         if !valid_capability_id(id) {
             return Err(DenyReason::BadGrant);
         }
-        if let Some(c) = compute_ceiling_j {
-            if !c.is_finite() || c < 0.0 {
-                return Err(DenyReason::BadCeiling);
-            }
-        }
+        let compute_ceiling_j = match compute_ceiling_j {
+            None => None,
+            Some(c) => Some(canonical_nonneg(c).ok_or(DenyReason::BadCeiling)?),
+        };
         let parsed = parse_action(action.canonical().as_bytes())?;
-        if parsed != action {
+        if parsed != action || action.scope_binding().is_none() {
             return Err(DenyReason::BadGrant);
         }
         Ok(Grant {
@@ -203,51 +209,104 @@ impl Grant {
     }
 }
 
-/// Record of an allow. `_seal` stops other crates from building a permit by struct literal.
+/// Energy fact recorded on an in-scope result. This is not a meter reading taken by `auth`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnergyCommitment {
+    /// No matching grant carried a ceiling. Not an approval of any joule figure.
+    NotApplied,
+    /// Strictest ceiling, and the exact non-negative measured figure that was within it.
+    WithinCeiling {
+        ceiling_bits: u64,
+        joules_bits: u64,
+        provenance: Provenance,
+    },
+}
+
+/// Record that one proposal matched a grant's exact scope. `_seal` blocks struct literals
+/// outside this crate. Holding this value does not run anything.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Permit {
+pub struct ScopeCheck {
     capability_id: String,
-    binding: Hash,
+    scope_binding: Hash,
+    commitment: EnergyCommitment,
     _seal: (),
 }
 
-impl Permit {
+impl ScopeCheck {
     pub fn capability_id(&self) -> &str {
         &self.capability_id
     }
-    pub fn binding(&self) -> &Hash {
-        &self.binding
+    pub fn scope_binding(&self) -> &Hash {
+        &self.scope_binding
     }
-    /// True only when `action` is the exact action this allow was computed for.
-    pub fn covers(&self, action: &Action) -> bool {
-        self.binding == action.binding()
+    pub fn energy_commitment(&self) -> EnergyCommitment {
+        self.commitment
+    }
+    /// Scope only. A true result does not check energy and is not an execution request.
+    pub fn same_scope(&self, action: &Action) -> bool {
+        action.scope_binding().as_ref() == Some(&self.scope_binding)
+    }
+    /// True only for the same canonical scope and the same energy commitment.
+    ///
+    /// `NotApplied` matches `energy == None` only. A checked ceiling matches only the same
+    /// provenance and the same canonical joule bits. This is a comparison of the decision
+    /// record, not a second grant and not a call to run the scope.
+    pub fn same_commitment(&self, action: &Action, energy: Option<&Energy>) -> bool {
+        if !self.same_scope(action) {
+            return false;
+        }
+        match self.commitment {
+            EnergyCommitment::NotApplied => energy.is_none(),
+            EnergyCommitment::WithinCeiling {
+                ceiling_bits,
+                joules_bits,
+                provenance,
+            } => {
+                let Some(e) = energy else {
+                    return false;
+                };
+                let Some(ceiling) = canonical_nonneg(f64::from_bits(ceiling_bits)) else {
+                    return false;
+                };
+                let Some(got) = canonical_joule_bits(e.joules) else {
+                    return false;
+                };
+                let stored_ok =
+                    canonical_nonneg_bits(f64::from_bits(joules_bits)) == Some(joules_bits);
+                e.provenance == provenance
+                    && got == joules_bits
+                    && stored_ok
+                    && f64::from_bits(joules_bits) <= ceiling
+            }
+        }
     }
 }
 
-/// Result of [`authorize`]. An allow is not an instruction to execute anything.
+/// Result of [`authorize`]. [`Decision::InScope`] means the proposal matched a grant.
+/// It is not an instruction to execute the named reference.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[must_use = "an authorization decision must be checked; allow does not execute"]
+#[must_use = "an in-scope result must be checked; it does not execute"]
 pub enum Decision {
-    Allow(Permit),
+    InScope(ScopeCheck),
     Deny(DenyReason),
 }
 
 impl Decision {
-    pub fn is_allow(&self) -> bool {
-        matches!(self, Decision::Allow(_))
+    pub fn is_in_scope(&self) -> bool {
+        matches!(self, Decision::InScope(_))
     }
     pub fn is_deny(&self) -> bool {
         matches!(self, Decision::Deny(_))
     }
-    pub fn permit(&self) -> Option<&Permit> {
+    pub fn scope_check(&self) -> Option<&ScopeCheck> {
         match self {
-            Decision::Allow(p) => Some(p),
+            Decision::InScope(p) => Some(p),
             Decision::Deny(_) => None,
         }
     }
     pub fn denial(&self) -> Option<DenyReason> {
         match self {
-            Decision::Allow(_) => None,
+            Decision::InScope(_) => None,
             Decision::Deny(r) => Some(*r),
         }
     }
@@ -256,12 +315,27 @@ impl Decision {
 impl std::fmt::Display for Decision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Decision::Allow(p) => write!(
-                f,
-                "allow capability_id={} binding={}",
-                p.capability_id(),
-                hex(p.binding())
-            ),
+            Decision::InScope(p) => match p.energy_commitment() {
+                EnergyCommitment::NotApplied => write!(
+                    f,
+                    "in_scope capability_id={} scope={} energy=not_applied",
+                    p.capability_id(),
+                    hex(p.scope_binding())
+                ),
+                EnergyCommitment::WithinCeiling {
+                    ceiling_bits,
+                    joules_bits,
+                    provenance,
+                } => write!(
+                    f,
+                    "in_scope capability_id={} scope={} energy={} joules={} ceiling_j={}",
+                    p.capability_id(),
+                    hex(p.scope_binding()),
+                    provenance_label(provenance),
+                    f64::from_bits(joules_bits),
+                    f64::from_bits(ceiling_bits)
+                ),
+            },
             Decision::Deny(r) => write!(f, "deny {r}"),
         }
     }
@@ -323,8 +397,8 @@ pub fn parse_action(bytes: &[u8]) -> Result<Action, DenyReason> {
 ///
 /// On an exact action match, every matching ceiling applies and the strictest one wins.
 /// A grant that sets no ceiling does not cancel a grant that sets one. Energy is read
-/// only from `energy`; this function does not meter.
-#[must_use = "an authorization decision must be checked; allow does not execute"]
+/// only from `energy`; this function does not meter. An in-scope result is not execution.
+#[must_use = "an in-scope result must be checked; it does not execute"]
 pub fn authorize(grants: &[Grant], proposal: &[u8], energy: Option<&Energy>) -> Decision {
     let action = match parse_action(proposal) {
         Ok(a) => a,
@@ -333,6 +407,9 @@ pub fn authorize(grants: &[Grant], proposal: &[u8], energy: Option<&Energy>) -> 
     if action.canonical().as_bytes() != proposal {
         return Decision::Deny(DenyReason::Malformed);
     }
+    let Some(want) = action.scope_binding() else {
+        return Decision::Deny(DenyReason::Malformed);
+    };
     if grants.is_empty() {
         return Decision::Deny(DenyReason::NoAuthority);
     }
@@ -345,7 +422,8 @@ pub fn authorize(grants: &[Grant], proposal: &[u8], energy: Option<&Energy>) -> 
             continue;
         }
         saw_kind = true;
-        if g.action != action {
+        // Exact scope is the canonical binding, not a separately supplied payload.
+        if g.action.scope_binding() != Some(want) {
             continue;
         }
         match g.compute_ceiling_j {
@@ -370,14 +448,31 @@ pub fn authorize(grants: &[Grant], proposal: &[u8], energy: Option<&Energy>) -> 
             DenyReason::ActionMismatch
         });
     };
-    if let Some(ceiling) = strictest {
-        if let Some(reason) = energy_refusal(ceiling, energy) {
+    let commitment = if let Some(ceiling) = strictest {
+        let Some(e) = energy else {
+            return Decision::Deny(DenyReason::EnergyMissing);
+        };
+        if let Some(reason) = energy_refusal(ceiling, Some(e)) {
             return Decision::Deny(reason);
         }
-    }
-    Decision::Allow(Permit {
+        let (Some(ceiling_bits), Some(joules_bits)) = (
+            canonical_nonneg_bits(ceiling),
+            canonical_joule_bits(e.joules),
+        ) else {
+            return Decision::Deny(DenyReason::EnergyInvalid);
+        };
+        EnergyCommitment::WithinCeiling {
+            ceiling_bits,
+            joules_bits,
+            provenance: e.provenance,
+        }
+    } else {
+        EnergyCommitment::NotApplied
+    };
+    Decision::InScope(ScopeCheck {
         capability_id: id.to_string(),
-        binding: action.binding(),
+        scope_binding: want,
+        commitment,
         _seal: (),
     })
 }
@@ -405,6 +500,135 @@ fn binding_of(canonical: &str) -> Hash {
     h.update((canonical.len() as u64).to_le_bytes());
     h.update(canonical.as_bytes());
     h.finalize().into()
+}
+
+/// `+0.0` for signed zero. `None` when negative or not finite.
+fn canonical_nonneg(j: f64) -> Option<f64> {
+    if !j.is_finite() || j < 0.0 {
+        return None;
+    }
+    if j.to_bits() == (-0.0f64).to_bits() {
+        Some(0.0)
+    } else {
+        Some(j)
+    }
+}
+
+fn canonical_nonneg_bits(j: f64) -> Option<u64> {
+    canonical_nonneg(j).map(f64::to_bits)
+}
+
+fn canonical_joule_bits(j: f64) -> Option<u64> {
+    canonical_nonneg_bits(j)
+}
+
+/// Two read-only references a `/v1/decisions` response can name: the decision content
+/// hash, and the thread plus receipt hash. `grants` is an operator argument. This
+/// function does not read an HTTP body, a model probability, or a receipt signature,
+/// and it does not execute either reference.
+///
+/// `grant_source_configured` is false when `grants` is empty. That is the server
+/// state when no operator grant store exists. Both references then refuse with
+/// `no_authority` if they parse. Empty grants are not replaced with an invented grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecisionsAuthorization {
+    pub grant_source_configured: bool,
+    pub inspect_decision: Decision,
+    pub quote_receipt: Decision,
+}
+
+impl DecisionsAuthorization {
+    pub fn assess(
+        grants: &[Grant],
+        content_hash: Hash,
+        thread_id: &str,
+        receipt_hash: Hash,
+        energy: Option<&Energy>,
+    ) -> Self {
+        let inspect = Action::inspect_decision(content_hash);
+        let quote_receipt = match Action::quote_receipt(thread_id, receipt_hash) {
+            Ok(action) => authorize(grants, action.canonical().as_bytes(), energy),
+            Err(reason) => Decision::Deny(reason),
+        };
+        Self {
+            grant_source_configured: !grants.is_empty(),
+            inspect_decision: authorize(grants, inspect.canonical().as_bytes(), energy),
+            quote_receipt,
+        }
+    }
+
+    /// Fixed JSON. `executes` is always false, including when a scope matches.
+    pub fn to_json(&self) -> String {
+        let mut s = String::from(r#"{"v":1,"executes":false,"grant_source":"#);
+        if self.grant_source_configured {
+            s.push_str(r#""in_process","#);
+        } else {
+            s.push_str(r#""none","prerequisite":"no operator grant store is configured","#);
+        }
+        s.push_str(r#""inspect_decision":"#);
+        s.push_str(&scope_json(&self.inspect_decision));
+        s.push_str(r#","quote_receipt":"#);
+        s.push_str(&scope_json(&self.quote_receipt));
+        s.push('}');
+        s
+    }
+}
+
+fn scope_json(d: &Decision) -> String {
+    match d {
+        Decision::Deny(reason) => format!(r#"{{"scope_match":false,"reason":"{reason}"}}"#),
+        Decision::InScope(check) => {
+            let energy = match check.energy_commitment() {
+                EnergyCommitment::NotApplied => "\"not_applied\"".to_string(),
+                EnergyCommitment::WithinCeiling {
+                    ceiling_bits,
+                    joules_bits,
+                    provenance,
+                } => format!(
+                    r#"{{"provenance":"{}","joules":{},"ceiling_j":{}}}"#,
+                    provenance_label(provenance),
+                    fmt_joules(joules_bits),
+                    fmt_joules(ceiling_bits)
+                ),
+            };
+            format!(
+                r#"{{"scope_match":true,"capability_id":{},"energy":{}}}"#,
+                json_string(check.capability_id()),
+                energy
+            )
+        }
+    }
+}
+
+fn json_string(s: &str) -> String {
+    let mut o = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => o.push_str("\\\""),
+            '\\' => o.push_str("\\\\"),
+            c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+fn fmt_joules(bits: u64) -> String {
+    let j = f64::from_bits(bits);
+    if j.is_finite() {
+        format!("{j}")
+    } else {
+        "null".into()
+    }
+}
+
+fn provenance_label(p: Provenance) -> &'static str {
+    match p {
+        Provenance::HwShunt => "hw_shunt",
+        Provenance::ModelBased => "model_based",
+        Provenance::Estimator => "estimator",
+    }
 }
 
 fn same_kind(a: &Action, b: &Action) -> bool {
@@ -465,8 +689,8 @@ mod tests {
             provenance: p,
         }
     }
-    fn allow_of(d: &Decision) -> &Permit {
-        d.permit().expect("allow")
+    fn check_of(d: &Decision) -> &ScopeCheck {
+        d.scope_check().expect("in scope")
     }
 
     #[test]
@@ -484,10 +708,12 @@ mod tests {
             let g = Grant::issue("op.ping", action.clone(), None).unwrap();
             assert_eq!(g.compute_ceiling_j(), None);
             let d = authorize(&[g], bytes.as_bytes(), None);
-            let p = allow_of(&d);
-            assert!(p.covers(&action));
+            let p = check_of(&d);
+            assert!(p.same_scope(&action));
+            assert!(p.same_commitment(&action, None));
+            assert!(!p.same_commitment(&action, Some(&measured(0.0, Provenance::ModelBased))));
             assert_eq!(p.capability_id(), "op.ping");
-            assert_eq!(p.binding(), &action.binding());
+            assert_eq!(p.scope_binding(), &action.scope_binding().unwrap());
         }
     }
 
@@ -509,7 +735,7 @@ mod tests {
             authorize(&[g.clone()], wrapped.as_bytes(), None).denial(),
             Some(DenyReason::Unstructured)
         );
-        assert!(authorize(&[g], bytes.as_bytes(), None).is_allow());
+        assert!(authorize(&[g], bytes.as_bytes(), None).is_in_scope());
     }
 
     #[test]
@@ -624,8 +850,8 @@ mod tests {
             authorize(&[qg], rehash.canonical().as_bytes(), None).denial(),
             Some(DenyReason::ScopeMismatch)
         );
-        assert_ne!(inspect.binding(), other.binding());
-        assert_ne!(inspect.binding(), quote.binding());
+        assert_ne!(inspect.scope_binding(), other.scope_binding());
+        assert_ne!(inspect.scope_binding(), quote.scope_binding());
     }
 
     #[test]
@@ -634,9 +860,10 @@ mod tests {
         let b = Action::inspect_decision([0xcd; 32]);
         let g = Grant::issue("op.ping", a.clone(), None).unwrap();
         let d = authorize(&[g], a.canonical().as_bytes(), None);
-        let p = allow_of(&d);
-        assert!(p.covers(&a));
-        assert!(!p.covers(&b));
+        let p = check_of(&d);
+        assert!(p.same_scope(&a));
+        assert!(!p.same_scope(&b));
+        assert!(!p.same_commitment(&b, None));
         let mut flipped = a.canonical().into_bytes();
         let last = flipped.len() - 2;
         flipped[last] = if flipped[last] == b'a' { b'b' } else { b'a' };
@@ -652,7 +879,7 @@ mod tests {
         for action in actions {
             let g = Grant::issue("op.ping", action.clone(), None).unwrap();
             let base = action.canonical().into_bytes();
-            assert!(authorize(&[g.clone()], &base, None).is_allow());
+            assert!(authorize(&[g.clone()], &base, None).is_in_scope());
             for i in 0..base.len() {
                 for delta in [1u8, 0x20, 0xff] {
                     let mut tampered = base.clone();
@@ -691,10 +918,10 @@ mod tests {
     #[test]
     fn binding_is_domain_separated_and_stable() {
         let action = Action::inspect_decision([0x44; 32]);
-        let again = action.binding();
-        assert_eq!(action.binding(), again);
+        let again = action.scope_binding();
+        assert_eq!(action.scope_binding(), again);
         let raw: Hash = Sha256::digest(action.canonical().as_bytes()).into();
-        assert_ne!(action.binding(), raw);
+        assert_ne!(action.scope_binding().unwrap(), raw);
         let text = format!("deny {}", authorize(&[], b"unique-marker-zxq", None));
         assert!(!text.contains("unique-marker"));
     }
@@ -705,20 +932,28 @@ mod tests {
         let bytes = action.canonical();
         let open = Grant::issue("op.open", action.clone(), None).unwrap();
         let nan = measured(f64::NAN, Provenance::ModelBased);
-        assert!(authorize(&[open], bytes.as_bytes(), Some(&nan)).is_allow());
+        let open_decision = authorize(&[open], bytes.as_bytes(), Some(&nan));
+        assert!(open_decision.is_in_scope());
+        assert!(check_of(&open_decision).same_commitment(&action, None));
+        assert!(!check_of(&open_decision).same_commitment(&action, Some(&nan)));
 
         let capped = Grant::issue("op.cap", action.clone(), Some(1.0)).unwrap();
         let ok = measured(1.0, Provenance::ModelBased);
-        assert!(authorize(&[capped.clone()], bytes.as_bytes(), Some(&ok)).is_allow());
+        let capped_ok = authorize(&[capped.clone()], bytes.as_bytes(), Some(&ok));
+        assert!(capped_ok.is_in_scope());
+        assert!(check_of(&capped_ok).same_commitment(&action, Some(&ok)));
+        assert!(!check_of(&capped_ok)
+            .same_commitment(&action, Some(&measured(1.0, Provenance::HwShunt))));
+        assert!(!check_of(&capped_ok).same_commitment(&action, None));
         let shunt = measured(0.25, Provenance::HwShunt);
-        assert!(authorize(&[capped.clone()], bytes.as_bytes(), Some(&shunt)).is_allow());
+        assert!(authorize(&[capped.clone()], bytes.as_bytes(), Some(&shunt)).is_in_scope());
         let zero = Grant::issue("op.zero", action.clone(), Some(0.0)).unwrap();
         assert!(authorize(
             &[zero.clone()],
             bytes.as_bytes(),
             Some(&measured(0.0, Provenance::ModelBased))
         )
-        .is_allow());
+        .is_in_scope());
         assert_eq!(
             authorize(
                 &[zero],
@@ -788,7 +1023,7 @@ mod tests {
             bytes.as_bytes(),
             Some(&measured(1.0, Provenance::ModelBased))
         )
-        .is_allow());
+        .is_in_scope());
         let unbounded = Grant::issue("op.wide", action.clone(), None).unwrap();
         let tight = Grant::issue("op.tight", action, Some(1.0)).unwrap();
         assert_eq!(
@@ -808,7 +1043,16 @@ mod tests {
             bytes.as_bytes(),
             Some(&measured(1.0, Provenance::ModelBased)),
         );
-        assert_eq!(allow_of(&d).capability_id(), "op.tight");
+        let checked = check_of(&d);
+        assert_eq!(checked.capability_id(), "op.tight");
+        assert!(matches!(
+            checked.energy_commitment(),
+            EnergyCommitment::WithinCeiling {
+                joules_bits,
+                ceiling_bits,
+                provenance: Provenance::ModelBased,
+            } if joules_bits == 1.0f64.to_bits() && ceiling_bits == 1.0f64.to_bits()
+        ));
     }
 
     #[test]
@@ -893,6 +1137,129 @@ mod tests {
             Verdict::Quarantine("unsigned")
         );
         let g = Grant::issue("op.ping", action, None).unwrap();
-        assert!(authorize(&[g], bytes.as_bytes(), None).is_allow());
+        assert!(authorize(&[g], bytes.as_bytes(), None).is_in_scope());
+    }
+
+    #[test]
+    fn noncanonical_struct_is_not_the_same_scope() {
+        let good = Action::quote_receipt("threadA", [9; 32]).unwrap();
+        let evil = Action::QuoteReceipt {
+            thread_id: "threadA\nbad".into(),
+            receipt_hash: [9; 32],
+        };
+        assert!(good.scope_binding().is_some());
+        assert!(evil.scope_binding().is_none());
+        let g = Grant::issue("op.quote", good.clone(), None).unwrap();
+        let d = authorize(&[g], good.canonical().as_bytes(), None);
+        assert!(check_of(&d).same_scope(&good));
+        assert!(!check_of(&d).same_scope(&evil));
+        assert!(!check_of(&d).same_commitment(&evil, None));
+    }
+
+    #[test]
+    fn negative_zero_ceiling_is_canonical_positive_zero() {
+        let action = Action::inspect_decision([0x77; 32]);
+        let g = Grant::issue("op.zero", action.clone(), Some(-0.0)).unwrap();
+        assert_eq!(g.compute_ceiling_j().unwrap().to_bits(), 0.0f64.to_bits());
+        let neg = measured(-0.0, Provenance::ModelBased);
+        let pos = measured(0.0, Provenance::ModelBased);
+        let d = authorize(&[g], action.canonical().as_bytes(), Some(&neg));
+        assert!(check_of(&d).same_commitment(&action, Some(&pos)));
+        assert!(!check_of(&d).same_commitment(&action, Some(&measured(0.0, Provenance::HwShunt))));
+    }
+
+    #[test]
+    fn signed_receipt_json_is_not_an_in_scope_result() {
+        use crate::ledger::{self, Ledger};
+        let mut ledger = Ledger::open(None, SigningKey::from_bytes(&[3; 32])).unwrap();
+        let signed = ledger
+            .record(
+                "threadA",
+                "input-1",
+                [1; 32],
+                Tier::Rules,
+                1,
+                1,
+                measured(0.0, Provenance::ModelBased),
+                measured(0.0, Provenance::Estimator),
+                Some("not-a-capability".into()),
+            )
+            .unwrap();
+        let json = ledger::to_json(&signed);
+        let action = Action::inspect_decision([1; 32]);
+        let g = Grant::issue("op.ping", action, Some(1.0)).unwrap();
+        assert_eq!(
+            authorize(
+                &[g],
+                json.as_bytes(),
+                Some(&measured(0.0, Provenance::ModelBased))
+            )
+            .denial(),
+            Some(DenyReason::Unstructured)
+        );
+        assert!(!json.contains("strix-rt/action/v1"));
+    }
+
+    #[test]
+    fn decisions_surface_default_denies_without_inventing_a_grant() {
+        let model = br#"{"object":"decision","answers":[{"type":"choice","choice":"commit","probability":1}]}"#;
+        assert_eq!(parse_action(model), Err(DenyReason::Unstructured));
+        let content = [0x11; 32];
+        let receipt = [0x22; 32];
+        let surface = DecisionsAuthorization::assess(&[], content, "default", receipt, None);
+        assert!(!surface.grant_source_configured);
+        assert_eq!(
+            surface.inspect_decision.denial(),
+            Some(DenyReason::NoAuthority)
+        );
+        assert_eq!(
+            surface.quote_receipt.denial(),
+            Some(DenyReason::NoAuthority)
+        );
+        let json = surface.to_json();
+        assert!(json.contains(r#""executes":false"#), "{json}");
+        assert!(json.contains(r#""grant_source":"none"#), "{json}");
+        assert!(
+            json.contains("no operator grant store is configured"),
+            "{json}"
+        );
+        assert!(
+            json.contains(r#""scope_match":false,"reason":"no_authority""#),
+            "{json}"
+        );
+        assert!(!json.contains("commit"));
+        let bad_thread = DecisionsAuthorization::assess(&[], content, "bad id", receipt, None);
+        assert_eq!(
+            bad_thread.quote_receipt.denial(),
+            Some(DenyReason::Malformed)
+        );
+        let grant = Grant::issue("op.inspect", Action::inspect_decision(content), None).unwrap();
+        let matched = DecisionsAuthorization::assess(
+            &[grant],
+            content,
+            "default",
+            receipt,
+            Some(&measured(0.0, Provenance::ModelBased)),
+        );
+        assert!(matched.grant_source_configured);
+        assert!(matched.inspect_decision.is_in_scope());
+        assert_eq!(
+            matched.quote_receipt.denial(),
+            Some(DenyReason::ActionMismatch)
+        );
+        let matched_json = matched.to_json();
+        assert!(
+            matched_json.contains(r#""executes":false"#),
+            "{matched_json}"
+        );
+        assert!(
+            matched_json.contains(r#""grant_source":"in_process""#),
+            "{matched_json}"
+        );
+        assert!(
+            matched_json.contains(r#""scope_match":true"#),
+            "{matched_json}"
+        );
+        assert!(!matched_json.contains("prerequisite"));
     }
 }

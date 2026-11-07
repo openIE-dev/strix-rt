@@ -38,14 +38,24 @@ fn allowed_harmless_fixtures() {
         Grant::issue("op.quote", quote.clone(), Some(0.5)).unwrap(),
     ];
     let di = authorize(&grants, inspect.canonical().as_bytes(), None);
-    assert!(di.is_allow(), "{di}");
-    assert!(di.permit().unwrap().covers(&inspect));
-    assert!(!di.permit().unwrap().covers(&quote));
+    assert!(di.is_in_scope(), "{di}");
+    assert!(di.scope_check().unwrap().same_scope(&inspect));
+    assert!(di.scope_check().unwrap().same_commitment(&inspect, None));
+    assert!(!di.scope_check().unwrap().same_scope(&quote));
     let measured = energy(0.5, Provenance::ModelBased);
     let dq = authorize(&grants, quote.canonical().as_bytes(), Some(&measured));
-    assert!(dq.is_allow(), "{dq}");
-    assert_eq!(dq.permit().unwrap().capability_id(), "op.quote");
-    assert!(dq.permit().unwrap().covers(&quote));
+    assert!(dq.is_in_scope(), "{dq}");
+    assert_eq!(dq.scope_check().unwrap().capability_id(), "op.quote");
+    assert!(dq
+        .scope_check()
+        .unwrap()
+        .same_commitment(&quote, Some(&measured)));
+    let other_energy = energy(0.5, Provenance::HwShunt);
+    assert!(!dq
+        .scope_check()
+        .unwrap()
+        .same_commitment(&quote, Some(&other_energy)));
+    assert!(!dq.scope_check().unwrap().same_scope(&inspect));
 }
 
 #[test]
@@ -126,8 +136,8 @@ fn payload_substitution_and_missing_authority() {
     assert_deny(&[], a.canonical().as_bytes(), None, DenyReason::NoAuthority);
     let g = Grant::issue("op.inspect", a.clone(), None).unwrap();
     let d = authorize(&[g.clone()], a.canonical().as_bytes(), None);
-    assert!(d.permit().unwrap().covers(&a));
-    assert!(!d.permit().unwrap().covers(&b));
+    assert!(d.scope_check().unwrap().same_commitment(&a, None));
+    assert!(!d.scope_check().unwrap().same_scope(&b));
     assert_deny(
         &[g.clone()],
         b.canonical().as_bytes(),
@@ -207,5 +217,28 @@ fn energy_refusal_follows_receipt_semantics() {
         bytes.as_bytes(),
         Some(&energy(1.0, Provenance::ModelBased)),
     );
-    assert!(matches!(d, Decision::Allow(_)), "{d}");
+    assert!(matches!(d, Decision::InScope(_)), "{d}");
+}
+
+#[test]
+fn decisions_response_references_do_not_accept_model_commit() {
+    use receipt::auth::DecisionsAuthorization;
+    let model = br#"{"commit":true,"answers":[{"choice":"Commit","probability":1.0}]}"#;
+    assert_eq!(
+        receipt::auth::parse_action(model),
+        Err(DenyReason::Unstructured)
+    );
+    let surface = DecisionsAuthorization::assess(&[], [0xab; 32], "threadA", [0xcd; 32], None);
+    let json = surface.to_json();
+    assert!(json.contains(r#""executes":false"#));
+    assert!(json.contains(r#""grant_source":"none"#));
+    assert_eq!(
+        surface.inspect_decision.denial(),
+        Some(DenyReason::NoAuthority)
+    );
+    assert_eq!(
+        surface.quote_receipt.denial(),
+        Some(DenyReason::NoAuthority)
+    );
+    assert!(!json.contains("Commit"));
 }

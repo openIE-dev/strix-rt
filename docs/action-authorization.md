@@ -65,21 +65,34 @@ field, a missing field, CR, NUL, or a second document is `malformed`.
 
 ## Binding
 
-An allow carries a `Permit` whose binding is SHA-256 over the domain
-`strix-rt/action-binding/v1` and the length-prefixed canonical bytes (the same
-length-prefix habit as the other JouleContract hashes in this crate). The action's
-parameters are the scope: there is no extra payload field that can be swapped after
-the decision.
+An in-scope result is a `ScopeCheck`, not a permit to run anything. Its scope
+binding is SHA-256 over the domain `strix-rt/action-binding/v1` and the
+length-prefixed canonical bytes (the same length-prefix habit as the other
+JouleContract hashes in this crate). The action's parameters are the scope. There
+is no extra payload field.
 
-`Permit::covers` is true only for that action. Changing one byte of a granted
-proposal denies. A `Permit` is not a bearer token. Other crates cannot construct
-one, and nothing in `receipt` performs I/O because a permit exists. Calling
-`covers` is not a second authorization and does not re-check energy.
+`same_scope` is true only for that canonical scope, and only if the value still
+round-trips through `parse_action`. A hand-built struct whose thread id (or any
+other field) is not canonical does not share the binding. Changing one byte of a
+granted proposal is a refusal. Other crates cannot construct a `ScopeCheck`.
+Nothing in `receipt` performs I/O because one exists.
 
-Grants are tried as a set of exact matches. The strictest `compute_ceiling_j` among
-exact matches applies. A grant with no ceiling does not cancel a grant that has one.
-The reported `capability_id` is the grant that supplied that strictest ceiling, or
-the first exact match when no ceiling is set.
+`same_commitment` also checks the energy fact:
+
+- `NotApplied` matches only `energy == None`. Passing a joule figure later does not
+  attach a measurement to a decision that did not review one.
+- `WithinCeiling` matches only the same provenance and the same canonical joule
+  bits (`-0.0` is stored as `+0.0`). `HwShunt` and `ModelBased` of the same number
+  are different commitments. Dropping the figure, or raising it, does not match.
+
+`same_scope` does not re-check energy. Neither method executes the reference or
+re-runs authorization.
+
+Grants are matched on that canonical binding, not on `PartialEq` alone. The
+strictest `compute_ceiling_j` among exact matches applies. A grant with no ceiling
+does not cancel a grant that has one. The reported `capability_id` is the grant
+that supplied that strictest ceiling, or the first exact match when no ceiling is
+set. Signed zero ceilings are stored as `+0.0`.
 
 ## Energy
 
@@ -92,8 +105,8 @@ joule number.
 So:
 
 - A grant with `compute_ceiling_j: None` does not check energy and does not invent a
-  budget. Missing, NaN, or `Estimator` energy can still accompany an allow. That is
-  "no ceiling was asserted", not "the action is free in joules".
+  budget. The in-scope record then says `energy=not_applied`. That is "no ceiling
+  was asserted", not "these joules were approved".
 - When a matching ceiling is set, the caller must pass finite joules `>= 0` and
   `<=` the strictest ceiling, with provenance `HwShunt` or `ModelBased`.
 - `Estimator` is `energy_unmeasured`, including a cache-hit `0.0` tagged `Estimator`.
@@ -107,13 +120,15 @@ So:
 
 | Mechanism | What it decides | What it does not decide |
 |---|---|---|
-| `sign::Gate` | Envelope signature, subscription, payload hash, replay | Whether the payload is an allowed action |
-| `POST /v1/decisions` | Predicate, choice, and score probabilities, plus a signed slice receipt | Action authorization. `dispatched_tool` is still an unstructured `Option<String>` and `kev_serve` passes `None` |
-| `receipt::auth` | Typed capability match, exact scope, optional ceiling | Authenticity of an event envelope. It does not execute the action |
+| `sign::Gate` | Envelope signature, subscription, payload hash, replay | Whether the payload is in scope for a grant |
+| `SignedReceipt` / `ledger::to_json` | A signed JouleContract slice record | An `authorize` input. The JSON is unstructured as a proposal |
+| `POST /v1/decisions` | Predicate, choice, and score probabilities, plus a signed slice receipt | Authorization. `dispatched_tool` is still an unstructured `Option<String>` and `kev_serve` passes `None` |
+| `receipt::auth` | Typed scope match, exact canonical binding, optional ceiling commitment | Authenticity of an envelope, and execution. `Decision::InScope` does not run the reference |
 
 A destructive payload can verify under `sign::Gate` and still be `unstructured` here.
-A granted `inspect_decision` can be allowed here and still be quarantined as unsigned
-if it is presented to `sign::Gate` with no envelope. Both outcomes are tested.
+A granted `inspect_decision` can be in scope here and still be quarantined as unsigned
+if it is presented to `sign::Gate` with no envelope. A `ledger::to_json` signed receipt
+is unstructured as a proposal even when a grant exists. Those outcomes are tested.
 
 ## Integration status
 
@@ -130,14 +145,25 @@ Not found here: David's unpublished local working tree. This gate does not prete
 line up with modules that are not on the remote. If that tree already has a
 different capability type, this patch is against `34ad7dd` only (`git diff 34ad7dd`).
 
-`kev_serve` behavior is unchanged. The crate comment now points here so a probability
-is not mistaken for an allow. Infinity's `handle_content` path is still a design
-note (`docs/infinity-suspend-resume.md`); this function is not hooked into it.
+`kev_serve` on this public branch does not call `authorize`. The crate comment points
+here so a probability is not mistaken for an in-scope result. Infinity's
+`handle_content` path is still a design note (`docs/infinity-suspend-resume.md`).
+
+`DecisionsAuthorization::assess` names the two read-only references for one decision
+content hash and one receipt hash. It takes operator `grants` as a separate argument.
+It does not read the HTTP body or the model output. `to_json` always sets
+`executes` to false. An empty grant slice is `grant_source: none` and
+`no_authority` for every reference that parses. That is the honest result when the
+process has no grant store. This public tree does not invent one, and it does not
+attach that JSON from `kev_serve`.
+
+A private snapshot of local receipt and kev sources was assessed separately and is
+not committed on this branch. Do not treat this library as deployed protection.
 
 ## Limitations
 
 - Not general autonomous safety, not a sandbox, not an OS policy, not a deployment.
-- The only typable allows are references to an existing decision hash or receipt.
+- The only typable scopes are references to an existing decision hash or receipt.
   Adding an execution verb would be a code change to the closed set, which this
   gate is here to make obvious.
 - In-process grants are not signed. The signature gate does not vouch for them.
@@ -156,8 +182,8 @@ then prints decisions. The quote grant's ceiling is `0.5` J, supplied by the exa
 not by a meter. Expected shape:
 
 ```text
-allow capability_id=op.inspect binding=<64 hex>
-allow capability_id=op.quote binding=<64 hex>
+in_scope capability_id=op.inspect scope=<64 hex> energy=not_applied
+in_scope capability_id=op.quote scope=<64 hex> energy=model_based joules=0.5 ceiling_j=0.5
 deny no_authority
 deny unstructured
 deny unstructured

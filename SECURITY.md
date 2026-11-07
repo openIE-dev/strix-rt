@@ -11,6 +11,6 @@ will credit you if you like, but this is a small, read-only research project wit
 ## Action authorization
 
 `crates/receipt::auth` is a separate fail-closed check for two typed capabilities (`inspect_decision`, `quote_receipt`).
-It does not execute commands. A model saying Commit, a high decision probability, and a verified event envelope are not
-permission. See [docs/action-authorization.md](docs/action-authorization.md). This is not a claim that the runtime is safe
+It does not execute commands. `Decision::InScope` is a scope match, not a request to run the named reference. A model saying Commit, a high decision probability, a verified event envelope, and a signed slice receipt are not
+authorization. See [docs/action-authorization.md](docs/action-authorization.md). This is not a claim that the runtime is safe
 to run as an autonomous agent. The servers above are still unhardened.

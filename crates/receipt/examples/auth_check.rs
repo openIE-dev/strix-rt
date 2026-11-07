@@ -5,8 +5,9 @@
 //!
 //! Run: `cargo run -p receipt --example auth_check`
 //!
-//! This binary prints allow/deny decisions. It does not spawn a process, open a
-//! shell, call a model, or read a power sensor. A deny is a successful check.
+//! This binary prints in-scope and deny decisions. It does not spawn a process, open a
+//! shell, call a model, or read a power sensor. A deny is a successful check. An
+//! in-scope line is a scope match, not a request to run anything.
 
 use receipt::auth::{authorize, Action, DenyReason, Grant};
 use receipt::{decision_hash, Energy, Provenance, Tier};
@@ -95,7 +96,13 @@ fn expect(grants: &[Grant], proposal: &[u8], energy: Option<&Energy>, denial: Op
         panic!("expected {denial:?}, got {got:?}");
     }
     if denial.is_none() {
-        let action = receipt::auth::parse_action(proposal).expect("canonical allow parses");
-        assert!(decision.permit().unwrap().covers(&action));
+        let action = receipt::auth::parse_action(proposal).expect("canonical scope parses");
+        let matched = decision.scope_check().expect("in scope");
+        assert!(matched.same_commitment(&action, energy));
+        let swapped = Energy {
+            joules: 9.0,
+            provenance: Provenance::HwShunt,
+        };
+        assert!(!matched.same_commitment(&action, Some(&swapped)));
     }
 }
