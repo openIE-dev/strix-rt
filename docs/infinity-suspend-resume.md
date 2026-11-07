@@ -84,3 +84,5 @@ Read: `crates/infinity-agent-core/src/{traits.rs,stores.rs,message.rs,event_proc
 
 ## Prototype
 `crates/receipt` (no GPU deps; sha2 only): `SliceReceipt`, `SliceKey`, `Tier`, `Provenance`, `InputKind`, `content_hash` (domain-separated, length-prefixed SHA-256; batch size excluded so batching does not change meaning), rolling `extend_prefix`, `receipt_hash` (chain), `cache_hit`, `apportion` (batch joules by token share, ModelBased). 9 unit tests. Signing (ed25519) and wiring into kev_serve are next.
+
+Signing and receipt emission on `/v1/decisions` landed after that sentence. Action authorization is a later, separate function, `crates/receipt::auth`, documented in [action-authorization.md](action-authorization.md). It is not hooked into `handle_content` or `kev_serve`, and it does not execute a dispatched tool. `sign::Gate` still only verifies envelopes. Mesh joule ceilings are still not a stored account; `auth` applies a ceiling only when a grant carries one, using the `Energy` value the caller already has. It does not meter.

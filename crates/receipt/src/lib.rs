@@ -1,12 +1,16 @@
 //! JouleContract-style per-slice receipts for an Infinity-style suspend/resume layer in front of /v1/decisions
-//! (docs/infinity-suspend-resume.md). Types + content hash only: no GPU, no I/O, no signing yet.
+//! (docs/infinity-suspend-resume.md). No GPU. `auth` performs no I/O.
 //! A slice = one completion + persist + at most one tool dispatch. Two keys, deliberately separate:
 //!   - `input_id`: delivery dedup (Infinity's processed_message_ids). Opaque, NOT hashed.
 //!   - `content_hash`: what was computed (history prefix, input payload, model, tier, decode params). Doubles as the
 //!     JouleClaw L0 cache key. Must not depend on run-time randomness (e.g. Infinity's uuid synthetic tool-call ids).
+//!
+//! `sign::Gate` checks event-envelope signatures only. `auth` is a separate fail-closed capability check.
+//! A verified signature is not permission to act, and `auth` does not execute anything (docs/action-authorization.md).
 pub mod sign;
 pub mod ledger;
 pub mod meter;
+pub mod auth;
 use sha2::{Digest, Sha256};
 
 pub type Hash = [u8; 32];

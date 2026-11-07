@@ -8,6 +8,8 @@
 //! KEV_POWER=<uW file>) integrated over the request, gross, ModelBased; wait_j = 0 (stateless, nothing resident), Estimator.
 //! KEV_RECEIPT_KEY=<32-byte or hex seed file> (else an ephemeral key per run); KEV_RECEIPT_LEDGER=<tsv> persists the
 //! per-thread seq/prev-hash chain (default ~/.local/state/strix-rt/receipts.tsv; "-" = in memory only).
+//! Probabilities, the word Commit, and a signed receipt are not action authorization. That check is
+//! `receipt::auth` (docs/action-authorization.md). This server does not call it and does not execute tools.
 use anyhow::{anyhow, Result};
 use kev::{decisions, json::{self, J}, systemone, Kev};
 use std::io::{BufRead, BufReader, Read, Write};

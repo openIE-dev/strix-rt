@@ -7,3 +7,10 @@ The optional kernel module `kmod/strixpc` runs in the kernel; load it only on a 
 
 If you find a security problem, please email **contact@openie.dev** instead of opening a public issue. We read every report and
 will credit you if you like, but this is a small, read-only research project with no support promise or fixed response time.
+
+## Action authorization
+
+`crates/receipt::auth` is a separate fail-closed check for two typed capabilities (`inspect_decision`, `quote_receipt`).
+It does not execute commands. A model saying Commit, a high decision probability, and a verified event envelope are not
+permission. See [docs/action-authorization.md](docs/action-authorization.md). This is not a claim that the runtime is safe
+to run as an autonomous agent. The servers above are still unhardened.

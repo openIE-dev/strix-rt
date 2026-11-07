@@ -21,6 +21,7 @@ and it is why so many entries say whether the box was quiet.
 | [cosmos3.md](cosmos3.md) | Cosmos3-Nano text-to-video |
 | [parakeet.md](parakeet.md) | Parakeet Redux speech-to-text |
 | [decision_models.md](decision_models.md) | "System One" decision models (Kev, Laya) and energy per decision |
+| [action-authorization.md](action-authorization.md) | Fail-closed typed capability gate; what it does not execute or claim |
 | [../PROGRESS.md](../PROGRESS.md) | Day-by-day progress log from the first GEMV to video generation |
 
 Logs and session scripts named in these files are under `../logs/`. A few large logs, binary dumps, audio, video and images were
